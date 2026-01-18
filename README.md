@@ -79,6 +79,9 @@ Download `base.zip` from the [official NextUI releases](https://github.com/LoveR
 
 ### Netplay (LAN)
 
+<img width="512" height="384" alt="netplay" src="https://github.com/user-attachments/assets/42ac9c9f-4f9c-4560-a45a-fd5586487564" />
+
+
 #### Hosting a Game
 
 1. Ensure both devices are connected to the same WiFi network
@@ -96,6 +99,8 @@ Download `base.zip` from the [official NextUI releases](https://github.com/LoveR
 5. Once connected, gameplay will be synchronized
 
 ### GBA Link
+
+<img width="512" height="384" alt="gbalink" src="https://github.com/user-attachments/assets/4b86e21f-9f09-4e62-b5b2-a7c4618bf3b7" />
 
 #### Hosting a Session
 
