@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "network_common.h"
 
 #define NETPLAY_DEFAULT_PORT 55435
 #define NETPLAY_DISCOVERY_PORT 55436
@@ -22,8 +23,14 @@
 #define NETPLAY_FRAME_BUFFER_SIZE 64
 #define NETPLAY_FRAME_MASK (NETPLAY_FRAME_BUFFER_SIZE - 1)
 
-// Hotspot SSID prefix for Netplay
-#define NETPLAY_HOTSPOT_SSID_PREFIX "Netplay-"
+// Stall/timeout constants - extended for reliability on lossy networks
+// Pokemon games can pause 2+ seconds during save operations
+#define NETPLAY_STALL_TIMEOUT_FRAMES 180      // 3 seconds at 60fps (was 30 frames/500ms)
+#define NETPLAY_STALL_WARNING_FRAMES 60       // 1 second warning before disconnect
+#define NETPLAY_KEEPALIVE_INTERVAL_FRAMES 30  // Send keepalive every 500ms during stall
+
+// Hotspot SSID prefix - use unified prefix for all link types
+#define NETPLAY_HOTSPOT_SSID_PREFIX LINK_HOTSPOT_SSID_PREFIX
 
 typedef enum {
     NETPLAY_CONN_WIFI = 0,
@@ -62,10 +69,16 @@ typedef struct {
 void Netplay_init(void);
 void Netplay_quit(void);
 
+// Check if a core version supports netplay (frame-sync)
+// Returns true if supported, also sets internal support flag
+bool Netplay_checkCoreSupport(const char* core_version);
+
 // Connection management
-int Netplay_startHost(const char* game_name, uint32_t game_crc);
-int Netplay_startHostWithHotspot(const char* game_name, uint32_t game_crc);
+// If hotspot_ip is NULL, uses WiFi mode. Otherwise, uses hotspot mode with given IP.
+int Netplay_startHost(const char* game_name, uint32_t game_crc, const char* hotspot_ip);
 int Netplay_stopHost(void);
+int Netplay_stopHostFast(void);  // Skips blocking PLAT_stopHotspot - use with async cleanup
+void Netplay_stopBroadcast(void);  // Stop UDP broadcast but keep session active
 int Netplay_connectToHost(const char* ip, uint16_t port);
 void Netplay_disconnect(void);
 
@@ -79,7 +92,6 @@ bool Netplay_isConnected(void);
 bool Netplay_isActive(void);
 const char* Netplay_getStatusMessage(void);
 const char* Netplay_getLocalIP(void);
-void Netplay_clearLocalIP(void);
 bool Netplay_hasNetworkConnection(void);
 
 // Host discovery (for client)
@@ -93,6 +105,10 @@ bool Netplay_preFrame(void);
 
 // Get inputs for a specific player (called by input_state_callback)
 uint16_t Netplay_getInputState(unsigned port);
+
+// Get player buttons with netplay handling
+// Returns synchronized netplay input if connected, otherwise local_buttons for port 0
+uint32_t Netplay_getPlayerButtons(unsigned port, uint32_t local_buttons);
 
 // Set local player's input for current frame
 void Netplay_setLocalInput(uint16_t input);
@@ -112,16 +128,22 @@ int Netplay_receiveState(void* data, size_t size);
 bool Netplay_needsStateSync(void);
 void Netplay_completeStateSync(void);
 
-// Frame info
-uint32_t Netplay_getFrameCount(void);
-
-// Update function (call periodically for connection handling)
-void Netplay_update(void);
-
 // Pause/resume for menu (keeps connection alive)
 void Netplay_pause(void);           // Called when entering menu
 void Netplay_resume(void);          // Called when exiting menu
 void Netplay_pollWhilePaused(void); // Call periodically during menu to maintain connection
 bool Netplay_isPaused(void);        // Check if paused
+
+// Main loop update - handles state sync and frame synchronization
+// Returns: 1 = run frame, 0 = skip frame (stalled/syncing)
+// Callbacks are for core serialization (can be NULL if netplay not active)
+typedef size_t (*Netplay_SerializeSizeFn)(void);
+typedef bool (*Netplay_SerializeFn)(void* data, size_t size);
+typedef bool (*Netplay_UnserializeFn)(const void* data, size_t size);
+
+int Netplay_update(uint16_t local_input,
+                   Netplay_SerializeSizeFn serialize_size_fn,
+                   Netplay_SerializeFn serialize_fn,
+                   Netplay_UnserializeFn unserialize_fn);
 
 #endif /* NETPLAY_H */

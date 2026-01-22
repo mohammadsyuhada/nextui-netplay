@@ -25,15 +25,18 @@
 #include "api.h"
 #include "utils.h"
 #include "scaler.h"
+#include "minarch.h"
 #include "netplay.h"
 #include "gbalink.h"
+#include "gblink.h"
+#include "netplay_helper.h"
 #include <dirent.h>
 #include <SDL2/SDL_image.h>
 #include <SDL2/SDL.h>
 
 ///////////////////////////////////////
 
-static SDL_Surface* screen;
+SDL_Surface* screen;
 static int quit = 0;
 static int newScreenshot = 0;
 static int show_menu = 0;
@@ -77,30 +80,30 @@ static int has_custom_controllers = 0;
 static int gamepad_type = 0; // index in gamepad_labels/gamepad_values
 static int downsample = 0; // set to 1 to convert from 8888 to 565
 // these are no longer constants as of the RG CubeXX (even though they look like it)
-static int DEVICE_WIDTH = 0; // FIXED_WIDTH;
-static int DEVICE_HEIGHT = 0; // FIXED_HEIGHT;
-static int DEVICE_PITCH = 0; // FIXED_PITCH;
+int DEVICE_WIDTH = 0; // FIXED_WIDTH;
+int DEVICE_HEIGHT = 0; // FIXED_HEIGHT;
+int DEVICE_PITCH = 0; // FIXED_PITCH;
 
 GFX_Renderer renderer;
 
 ///////////////////////////////////////
 
-static struct Core {
+struct {
 	int initialized;
 	int need_fullpath;
-	
+
 	const char tag[8]; // eg. GBC
 	const char name[128]; // eg. gambatte
 	const char version[128]; // eg. Gambatte (v0.5.0-netlink 7e02df6)
 	const char extensions[128]; // eg. gb|gbc|dmg
-	
+
 	const char config_dir[MAX_PATH]; // eg. /mnt/sdcard/.userdata/rg35xx/GB-gambatte
 	const char states_dir[MAX_PATH]; // eg. /mnt/sdcard/.userdata/arm-480/GB-gambatte
 	const char saves_dir[MAX_PATH]; // eg. /mnt/sdcard/Saves/GB
 	const char bios_dir[MAX_PATH]; // eg. /mnt/sdcard/Bios/GB
 	const char cheats_dir[MAX_PATH]; // eg. /mnt/sdcard/Cheats/GB
 	const char overlays_dir[MAX_PATH]; // eg. /mnt/sdcard/Cheats/GB
-	
+
 	double fps;
 	double sample_rate;
 	double aspect_ratio;
@@ -108,11 +111,11 @@ static struct Core {
 	void* handle;
 	void (*init)(void);
 	void (*deinit)(void);
-	
+
 	void (*get_system_info)(struct retro_system_info *info);
 	void (*get_system_av_info)(struct retro_system_av_info *info);
 	void (*set_controller_port_device)(unsigned port, unsigned device);
-	
+
 	void (*reset)(void);
 	void (*run)(void);
 	size_t (*serialize_size)(void);
@@ -126,22 +129,24 @@ static struct Core {
 	unsigned (*get_region)(void);
 	void *(*get_memory_data)(unsigned id);
 	size_t (*get_memory_size)(unsigned id);
-	
+
 	retro_core_options_update_display_callback_t update_visibility_callback;
 	// retro_audio_buffer_status_callback_t audio_buffer_status;
 
 	// Netpacket interface (for GBA Link support)
 	bool has_netpacket;
-	struct retro_netpacket_callback netpacket_callbacks;
 
 	// Whether to show netplay menu (false for cores that don't support it like mGBA)
 	bool show_netplay;
+
+	// GB Link support (gambatte core)
+	bool has_gblink;
 } core;
 
 int extract_zip(char** extensions);
 static bool getAlias(char* path, char* alias);
 
-static struct Game {
+struct {
 	char path[MAX_PATH];
 	char name[MAX_PATH]; // TODO: rename to basename?
 	char alt_name[MAX_PATH]; // alternate name, eg. unzipped rom file name
@@ -151,6 +156,13 @@ static struct Game {
 	size_t size;
 	int is_open;
 } game;
+
+// Accessor functions for netplay_helper.c
+const char* minarch_getCoreTag(void) { return core.tag; }
+const char* minarch_getGameName(void) { return game.name; }
+void* minarch_getGameData(void) { return game.data; }
+size_t minarch_getGameSize(void) { return game.size; }
+
 static void Game_open(char* path) {
 	LOG_info("Game_open\n");
 	int skipzip = 0;
@@ -2173,7 +2185,7 @@ char** list_files_in_folder(const char* folderPath, int* fileCount, const char* 
 
 
 
-static void OptionList_setOptionValue(OptionList* list, const char* key, const char* value);
+void OptionList_setOptionValue(OptionList* list, const char* key, const char* value);
 enum {
 	CONFIG_WRITE_ALL,
 	CONFIG_WRITE_GAME,
@@ -2548,6 +2560,11 @@ static void Config_write(int override) {
 	
 	fclose(file);
 	sync();
+
+	// Reload user_cfg from disk so in-memory config matches saved file
+	// This is needed because Config_readOptions() uses the in-memory string
+	if (config.user_cfg) free(config.user_cfg);
+	config.user_cfg = allocFile(path);
 }
 static void Config_restore(void) {
 	char path[MAX_PATH];
@@ -3100,7 +3117,7 @@ static Option* OptionList_getOption(OptionList* list, const char* key) {
 	}
 	return NULL;
 }
-static char* OptionList_getOptionValue(OptionList* list, const char* key) {
+char* OptionList_getOptionValue(OptionList* list, const char* key) {
 	Option* item = OptionList_getOption(list, key);
 	// if (item) LOG_info("\tGET %s (%s) = %s (%s)\n", item->name, item->key, item->labels[item->value], item->values[item->value]);
 	if (item) {
@@ -3125,14 +3142,39 @@ static void OptionList_setOptionRawValue(OptionList* list, const char* key, int 
 	}
 	else LOG_info("unknown option %s \n", key);
 }
-static void OptionList_setOptionValue(OptionList* list, const char* key, const char* value) {
+// Batch mode support for deferring config.core.changed flag
+// Used by gblink.c to set multiple core options atomically
+static int option_batch_mode = 0;
+static int option_batch_changed = 0;
+
+// Flag to skip video output during forced core.run() calls (e.g., for link option processing)
+// Declared here (before minarch_forceCoreOptionUpdate) but used in video_refresh_callback below
+static int skip_video_output = 0;
+
+void OptionList_beginBatch(void) {
+	option_batch_mode = 1;
+	option_batch_changed = 0;
+}
+
+void OptionList_endBatch(OptionList* list) {
+	option_batch_mode = 0;
+	if (option_batch_changed) {
+		list->changed = 1;
+		option_batch_changed = 0;
+	}
+}
+
+void OptionList_setOptionValue(OptionList* list, const char* key, const char* value) {
 	Option* item = OptionList_getOption(list, key);
 	if (item) {
 		Option_setValue(item, value);
-		list->changed = 1;
-		// LOG_info("\tSET %s (%s) TO %s (%s)\n", item->name, item->key, item->labels[item->value], item->values[item->value]);
+		if (option_batch_mode) {
+			option_batch_changed = 1;  // Defer flag until batch ends
+		} else {
+			list->changed = 1;
+		}
 		// if (list->on_set) list->on_set(list, key);
-		
+
 		if (exactMatch((char*)core.tag, "GB") && containsString(item->key, "palette")) Special_updatedDMGPalette(2); // from core
 	}
 	else LOG_info("unknown option %s \n", key);
@@ -3143,10 +3185,86 @@ static void OptionList_setOptionVisibility(OptionList* list, const char* key, in
 	else printf("unknown option %s \n", key); fflush(stdout);
 }
 
+// Accessor function for core option list (used by gblink.c and netplay_helper.c)
+OptionList* minarch_getCoreOptionList(void) {
+	return &config.core;
+}
+
+// Wrapper to end batch mode for config.core (used by gblink.c)
+void OptionList_endBatchCore(void) {
+	OptionList_endBatch(&config.core);
+}
+
+// Force core to process option changes immediately (used by gblink.c and netplay_helper.c)
+// Runs one frame with video output suppressed to trigger check_variables()
+void minarch_forceCoreOptionUpdate(void) {
+	skip_video_output = 1;
+	core.run();
+	skip_video_output = 0;
+}
+
+// Reset the core (used to reinitialize serial mode after option change)
+void minarch_resetCore(void) {
+	if (core.reset) {
+		core.reset();
+	}
+}
+
+// Save current config to file (used before core reset to preserve option changes)
+void minarch_saveConfig(void) {
+	Config_write(CONFIG_WRITE_ALL);
+}
+
+// Forward declaration for Core_load (defined later in file)
+void Core_load(void);
+
+// Reload the game to reinitialize core state (including serial mode)
+// This is more thorough than reset - it unloads and reloads the ROM
+void minarch_reloadGame(void) {
+	// Save current state
+	SRAM_write();
+	// Unload and reload the game
+	core.unload_game();
+	Core_load();
+}
+
+// Deferred reload mechanism - avoids segfaults when called from menu callbacks
+static int pending_reload = 0;
+
+void minarch_requestReload(void) {
+	pending_reload = 1;
+}
+
+int minarch_hasPendingReload(void) {
+	return pending_reload;
+}
+
+void minarch_doPendingReload(void) {
+	if (pending_reload) {
+		pending_reload = 0;
+		minarch_reloadGame();
+	}
+}
+
+// Wrapper for libretro log callback to intercept core messages
+static void core_log_callback(int level, const char* fmt, ...) {
+	char buffer[512];
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(buffer, sizeof(buffer), fmt, args);
+	va_end(args);
+
+	// Forward to normal log
+	LOG_note(level, "%s", buffer);
+
+	// Let GBLink process the message for connection state tracking
+	GBLink_processLogMessage(buffer);
+}
+
 ///////////////////////////////
 
-static void Menu_beforeSleep();
-static void Menu_afterSleep();
+void Menu_beforeSleep();
+void Menu_afterSleep();
 
 static void Menu_screenshot(void);
 
@@ -3176,11 +3294,12 @@ static void input_poll_callback(void) {
 	if (PAD_isPressed(BTN_MENU) && PAD_isPressed(BTN_SELECT)) {
 		ignore_menu = 1;
 		newScreenshot = 1;
+		Link_quitAll();
 		quit = 1;
 		Menu_saveState();
 		putFile(GAME_SWITCHER_PERSIST_PATH, game.path + strlen(SDCARD_PATH));
 		GFX_clear(screen);
-		
+
 	}
 	
 	if (PAD_justPressed(BTN_POWER)) {
@@ -3247,11 +3366,13 @@ static void input_poll_callback(void) {
 						break;
 					case SHORTCUT_RESET_GAME: core.reset(); break;
 					case SHORTCUT_SAVE_QUIT:
+						Link_quitAll();
 						newScreenshot = 1;
 						quit = 1;
 						Menu_saveState();
 						break;
 					case SHORTCUT_GAMESWITCHER:
+						Link_quitAll();
 						newScreenshot = 1;
 						quit = 1;
 						Menu_saveState();
@@ -3312,21 +3433,7 @@ static void input_poll_callback(void) {
 	// if (buttons) LOG_info("buttons: %i\n", buttons);
 }
 static int16_t input_state_callback(unsigned port, unsigned device, unsigned index, unsigned id) {
-	// Netplay input mapping:
-	// - When netplay active, inputs come from the synchronized frame buffer
-	// - Host = Player 1, Client = Player 2 (always)
-	// - Both devices see identical inputs for same frame
-
-	uint32_t player_buttons;
-
-	// Use netplay inputs if connected (even during stall recovery)
-	if (Netplay_getMode() != NETPLAY_OFF && Netplay_isConnected()) {
-		// Get synchronized input from frame buffer for this port
-		player_buttons = Netplay_getInputState(port);
-	} else {
-		// Local play - only P1 has input
-		player_buttons = (port == 0) ? buttons : 0;
-	}
+	uint32_t player_buttons = Netplay_getPlayerButtons(port, buttons);
 
 	// Digital joypad inputs
 	if (device == RETRO_DEVICE_JOYPAD && index == 0) {
@@ -3415,6 +3522,8 @@ static bool set_rumble_state(unsigned port, enum retro_rumble_effect effect, uin
 	return 1;
 }
 static bool environment_callback(unsigned cmd, void *data) { // copied from picoarch initially
+	// LOG_info("environment_callback: %i\n", cmd);
+
 	switch(cmd) {
 	// case RETRO_ENVIRONMENT_SET_ROTATION: { /* 1 */
 	// 	LOG_info("RETRO_ENVIRONMENT_SET_ROTATION %i\n", *(int *)data); // core requests frontend to handle rotation
@@ -3544,7 +3653,7 @@ static bool environment_callback(unsigned cmd, void *data) { // copied from pico
 	case RETRO_ENVIRONMENT_GET_LOG_INTERFACE: { /* 27 */
 		struct retro_log_callback *log_cb = (struct retro_log_callback *)data;
 		if (log_cb)
-			log_cb->log = (void (*)(enum retro_log_level, const char*, ...))LOG_note; // same difference
+			log_cb->log = (void (*)(enum retro_log_level, const char*, ...))core_log_callback;
 		break;
 	}
 	case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY: { /* 31 */
@@ -3694,7 +3803,7 @@ static bool environment_callback(unsigned cmd, void *data) { // copied from pico
 		// puts("RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2");
 		if (data) {
 			OptionList_reset();
-			OptionList_v2_init((const struct retro_core_options_v2 *)data); 
+			OptionList_v2_init((const struct retro_core_options_v2 *)data);
 		}
 		break;
 	}
@@ -3753,7 +3862,7 @@ static bool environment_callback(unsigned cmd, void *data) { // copied from pico
 		struct retro_hw_render_callback *cb = (struct retro_hw_render_callback*)data;
 
 		// Log the requested context
-		LOG_info("Core requested GL context type: %d, version %d.%d\n",
+		LOG_info("Core requested GL context type: %d, version %d.%d\n", 
 			cb->context_type, cb->version_major, cb->version_minor);
 
 		// Fallback if version is 0.0 or other unexpected values
@@ -3770,10 +3879,8 @@ static bool environment_callback(unsigned cmd, void *data) { // copied from pico
 		const struct retro_netpacket_callback *cb =
 			(const struct retro_netpacket_callback *)data;
 		if (cb) {
-			core.netpacket_callbacks = *cb;
 			core.has_netpacket = true;
-			GBALink_setCoreSupport(true);
-			LOG_info("Core registered netpacket interface (GBA Link supported)\n");
+			GBALink_setCoreCallbacks(cb);
 		}
 		return true;
 	}
@@ -3785,95 +3892,8 @@ static bool environment_callback(unsigned cmd, void *data) { // copied from pico
 }
 
 ///////////////////////////////
-// Netpacket bridging for GBA Link
-///////////////////////////////
 
-static bool gbalink_netpacket_active = false;
-static uint16_t gbalink_local_client_id = 0;   // 0 = host, 1 = client
-static uint16_t gbalink_remote_client_id = 1;  // Cached: 1 = client, 0 = host
-
-// Send function provided to core - bridges to gbalink network
-static void gbalink_netpacket_send(int flags, const void* buf, size_t len, uint16_t client_id) {
-	if (gbalink_netpacket_active) {
-		GBALink_sendPacket(flags, buf, len, client_id);
-	}
-}
-
-// Poll receive function provided to core - check for network data and deliver packets
-// Must match MAX_PACKETS_PER_POLL in gbalink.c to ensure same-frame delivery
-// Critical: Pokemon Union Room trade fails if packets are buffered until next frame
-#define GBALINK_MAX_PACKETS_PER_FRAME 64
-
-static void gbalink_netpacket_poll_receive(void) {
-	// gbalink_netpacket_active implies core.has_netpacket (checked at start time)
-	if (!gbalink_netpacket_active) return;
-
-	// Poll every call - minimize latency for games that need per-frame sync
-	GBALink_pollReceive();
-
-	// Deliver any pending packets to core (from buffer)
-	void* pkt_buf;
-	size_t pkt_len;
-	uint16_t pkt_client_id;
-
-	int packets_delivered = 0;
-	while (packets_delivered < GBALINK_MAX_PACKETS_PER_FRAME &&
-	       GBALink_getPendingPacket(&pkt_buf, &pkt_len, &pkt_client_id)) {
-		// In direct 2-player TCP, any received packet is from the remote peer.
-		// libretro API: client_id = SENDER's ID (not destination from packet header)
-		// gbalink_remote_client_id is cached at connection time
-		(void)pkt_client_id;  // Unused - packet header contains destination, not source
-		if (core.netpacket_callbacks.receive) {
-			core.netpacket_callbacks.receive(pkt_buf, pkt_len, gbalink_remote_client_id);
-		}
-		GBALink_consumePendingPacket();
-		packets_delivered++;
-	}
-}
-
-// Start netpacket session - called when gbalink connects
-void GBALink_notifyConnected(int is_host) {
-	if (!core.has_netpacket || gbalink_netpacket_active) return;
-
-	LOG_info("GBA Link: Starting netpacket session (is_host=%d)\n", is_host);
-
-	// Call core's start callback with our bridge functions
-	if (core.netpacket_callbacks.start) {
-		uint16_t client_id = is_host ? 0 : 1;  // 0 = host, 1 = client
-		gbalink_local_client_id = client_id;
-		gbalink_remote_client_id = is_host ? 1 : 0;
-		core.netpacket_callbacks.start(client_id, gbalink_netpacket_send, gbalink_netpacket_poll_receive);
-		gbalink_netpacket_active = true;
-	}
-
-	// Notify core that remote player connected
-	if (core.netpacket_callbacks.connected) {
-		core.netpacket_callbacks.connected(gbalink_remote_client_id);
-	}
-}
-
-// Stop netpacket session - called when gbalink disconnects
-void GBALink_notifyDisconnected(void) {
-	if (!gbalink_netpacket_active) return;
-
-	LOG_info("Stopping netpacket session\n");
-
-	// Notify core that remote player disconnected
-	if (core.netpacket_callbacks.disconnected) {
-		core.netpacket_callbacks.disconnected(1);  // Remote player
-	}
-
-	// Call core's stop callback
-	if (core.netpacket_callbacks.stop) {
-		core.netpacket_callbacks.stop();
-	}
-
-	gbalink_netpacket_active = false;
-}
-
-///////////////////////////////
-
-static void hdmimon(void) {
+void hdmimon(void) {
 	// handle HDMI change
 	static int had_hdmi = -1;
 	int has_hdmi = GetHDMI();
@@ -4821,8 +4841,12 @@ static size_t rgbaDataSize = 0;
 
 static void video_refresh_callback(const void* data, unsigned width, unsigned height, size_t pitch) {
 
+	// Skip rendering if flag is set (used during forced core.run() for option processing)
+	// or if quitting (core may still call callback after quit)
 	// I need to check quit here because sometimes quit is true but callback is still called by the core after and it still runs one more frame and it looks ugly :D
-	if(!quit) {
+	if(skip_video_output || quit) return;
+
+	if(1) {
 		if (!rgbaData || rgbaDataSize != width * height) {
 			if (rgbaData) free(rgbaData);
 			rgbaDataSize = width * height;
@@ -4885,6 +4909,7 @@ static void video_refresh_callback(const void* data, unsigned width, unsigned he
 ///////////////////////////////
 
 static void audio_sample_callback(int16_t left, int16_t right) {
+	if (Netplay_shouldSilenceAudio()) return;
 	if (!fast_forward || ff_audio) {
 		if (use_core_fps || fast_forward) {
 			SND_batchSamples_fixed_rate(&(const SND_Frame){left,right}, 1);
@@ -4895,6 +4920,7 @@ static void audio_sample_callback(int16_t left, int16_t right) {
 	}
 }
 static size_t audio_sample_batch_callback(const int16_t *data, size_t frames) {
+	if (Netplay_shouldSilenceAudio()) return frames;
 	if (!fast_forward || ff_audio) {
 		if (use_core_fps || fast_forward) {
 			return SND_batchSamples_fixed_rate((const SND_Frame*)data, frames);
@@ -4904,21 +4930,6 @@ static size_t audio_sample_batch_callback(const int16_t *data, size_t frames) {
 		}
 	}
 	else return frames;
-};
-
-// Netplay-aware audio wrappers - silence audio during stalls
-static void audio_sample_callback_netplay(int16_t left, int16_t right) {
-	if (Netplay_shouldSilenceAudio()) {
-		return;  // Drop sample to prevent stutter artifacts
-	}
-	audio_sample_callback(left, right);
-}
-
-static size_t audio_sample_batch_callback_netplay(const int16_t *data, size_t frames) {
-	if (Netplay_shouldSilenceAudio()) {
-		return frames;  // Pretend we consumed frames
-	}
-	return audio_sample_batch_callback(data, frames);
 }
 
 ///////////////////////////////////////
@@ -4995,9 +5006,8 @@ void Core_open(const char* core_path, const char* tag_name) {
 
 	set_environment_callback(environment_callback);
 	set_video_refresh_callback(video_refresh_callback);
-	// Use netplay-aware wrappers (minimal overhead when netplay is off)
-	set_audio_sample_callback(audio_sample_callback_netplay);
-	set_audio_sample_batch_callback(audio_sample_batch_callback_netplay);
+	set_audio_sample_callback(audio_sample_callback);
+	set_audio_sample_batch_callback(audio_sample_batch_callback);
 	set_input_poll_callback(input_poll_callback);
 	set_input_state_callback(input_state_callback);
 }
@@ -5044,10 +5054,9 @@ int Core_updateAVInfo(void) {
 void Core_load(void) {
 	LOG_info("Core_load\n");
 
-	// Reset netpacket support flag before loading (will be set by core if supported)
 	core.has_netpacket = false;
-	core.show_netplay = false;  // Default: hide netplay menu, enable only for supported cores
-	GBALink_setCoreSupport(false);
+	core.has_gblink = false;
+	core.show_netplay = false;
 
 	struct retro_game_info game_info;
 	game_info.path = game.tmp_path[0]?game.tmp_path:game.path;
@@ -5056,26 +5065,16 @@ void Core_load(void) {
 	LOG_info("game path: %s (%i)\n", game_info.path, game.size);
 	core.load_game(&game_info);
 
-	// Enable Netplay menu only for cores that support input-sync netplay
-	// These cores have been tested and work with the frame-synchronized netplay
-	if (containsString((char*)core.version, "FBNeo") ||
-	    containsString((char*)core.version, "FCEUmm") ||
-	    containsString((char*)core.version, "Snes9x") ||
-	    containsString((char*)core.version, "Supafaust") ||
-	    containsString((char*)core.version, "PicoDrive") ||
-	    containsString((char*)core.version, "PCSX") ||
-	    containsString((char*)core.version, "PrBoom")) {
+	if (Netplay_checkCoreSupport((char*)core.version)) {
 		core.show_netplay = true;
-		LOG_info("Netplay enabled for core: %s\n", core.version);
 	}
-
-	// Enable GBA Link menu for gpSP (only gpSP supports Wireless Adapter/RFU)
-	// gpSP supports Pokemon trading/battles via its netpacket interface
-	if (containsString((char*)core.version, "gpSP")) {
-		LOG_info("Enabling GBA Link support for gpSP core\n");
+	if (GBALink_checkCoreSupport((char*)core.version)) {
 		core.has_netpacket = true;
-		core.show_netplay = true;  // Show menu for GBA Link
-		GBALink_setCoreSupport(true);
+		core.show_netplay = true;
+	}
+	if (GBLink_checkCoreSupport((char*)core.version)) {
+		core.has_gblink = true;
+		core.show_netplay = true;
 	}
 
 	if (Cheats_load())
@@ -5135,7 +5134,7 @@ enum {
 };
 
 // TODO: I don't love how overloaded this has become
-static struct {
+struct {
 	SDL_Surface* bitmap;
 	SDL_Surface* overlay;
 	char* items[MENU_ITEM_COUNT];
@@ -5235,11 +5234,6 @@ void Menu_afterSleep() {
 
 typedef struct MenuList MenuList;
 typedef struct MenuItem MenuItem;
-enum {
-	MENU_CALLBACK_NOP,
-	MENU_CALLBACK_EXIT,
-	MENU_CALLBACK_NEXT_ITEM,
-};
 typedef int (*MenuList_callback_t)(MenuList* list, int i);
 typedef struct MenuItem {
 	char* name;
@@ -5294,7 +5288,7 @@ static int Menu_messageWithFont(char* message, char** pairs, TTF_Font* f) {
 	return MENU_CALLBACK_NOP; // TODO: this should probably be an arg
 }
 
-static int Menu_message(char* message, char** pairs) {
+int Menu_message(char* message, char** pairs) {
 	return Menu_messageWithFont(message, pairs, font.medium);
 }
 
@@ -5974,1843 +5968,6 @@ static int OptionShaders_openMenu(MenuList* list, int i) {
 	return MENU_CALLBACK_NOP;
 }
 
-///////////////////////////////
-// Netplay Menu
-///////////////////////////////
-
-// Helper function to ensure WiFi is enabled before netplay/link operations
-// Returns true if WiFi is enabled and ready, false if user cancelled or timeout
-static bool ensureWifiEnabled(void) {
-	if (PLAT_wifiEnabled()) {
-		return true;
-	}
-
-	// Show enabling message
-	GFX_setMode(MODE_MAIN);
-	GFX_clear(screen);
-	GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-	{
-		SDL_Surface* text = TTF_RenderUTF8_Blended(font.medium, "Enabling WiFi...", COLOR_WHITE);
-		int text_w = text->w;
-		SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){screen->w/2 - text_w/2, screen->h/2});
-		SDL_FreeSurface(text);
-	}
-	GFX_blitButtonGroup((char*[]){ "B","CANCEL", NULL }, 0, screen, 1);
-	GFX_flip(screen);
-
-	// Enable WiFi
-	PLAT_wifiEnable(true);
-
-	// Wait for WiFi to be enabled (with timeout and cancel option)
-	uint32_t start_time = SDL_GetTicks();
-	uint32_t timeout_ms = 10000; // 10 second timeout
-
-	while (!PLAT_wifiEnabled()) {
-		GFX_startFrame();
-		PAD_poll();
-
-		if (PAD_justPressed(BTN_B)) {
-			GFX_setMode(MODE_MENU);
-			return false;
-		}
-
-		if (SDL_GetTicks() - start_time > timeout_ms) {
-			GFX_setMode(MODE_MENU);
-			Menu_message("Failed to enable WiFi.\nPlease try again.", (char*[]){ "A","OKAY", NULL });
-			return false;
-		}
-
-		SDL_Delay(100);
-	}
-
-	// Give WiFi a moment to stabilize
-	SDL_Delay(500);
-
-	GFX_setMode(MODE_MENU);
-	return true;
-}
-
-static NetplayHostInfo netplay_hosts[NETPLAY_MAX_HOSTS];
-static int netplay_host_count = 0;
-static int netplay_selected_host = 0;
-static int netplay_force_resume = 0; // Flag to auto-close menus after successful connection
-static int netplay_connected_to_hotspot = 0;  // Track if client connected to Netplay hotspot
-
-// Forward declarations for hotspot helper functions
-static int OptionNetplay_hostGame_Hotspot(void);
-static int OptionNetplay_joinGame_Hotspot(void);
-
-// WiFi mode host (existing implementation)
-static int OptionNetplay_hostGame_WiFi(void) {
-	// Auto-enable WiFi if needed
-	if (!ensureWifiEnabled()) {
-		return MENU_CALLBACK_NOP;
-	}
-
-	// Check for network connectivity (required for WiFi mode)
-	if (!Netplay_hasNetworkConnection()) {
-		Menu_message("Network Required\n\nPlease connect to a WiFi\nnetwork before hosting.",
-			(char*[]){ "A","OKAY", NULL });
-		return MENU_CALLBACK_NOP;
-	}
-
-	// Get game name from current ROM
-	char game_name[64] = "Unknown Game";
-	if (game.name[0]) {
-		strncpy(game_name, game.name, sizeof(game_name) - 1);
-	}
-
-	// Calculate simple CRC from game data
-	uint32_t crc = 0;
-	if (game.data && game.size > 0) {
-		const uint8_t* data = (const uint8_t*)game.data;
-		for (size_t j = 0; j < game.size && j < 1024; j++) {
-			crc = (crc << 1) ^ data[j];
-		}
-	}
-
-	if (Netplay_startHost(game_name, crc) == 0) {
-		int dirty = 1;
-		int connected = 0;
-		int cancelled = 0;
-
-		// Auto-refresh loop for host waiting
-		GFX_setMode(MODE_MAIN);
-		while (1) {
-			GFX_startFrame();
-			PAD_poll();
-
-			// Check for cancellation
-			if (PAD_justPressed(BTN_B)) {
-				cancelled = 1;
-				break;
-			}
-
-			// Check connection state
-			NetplayState state = Netplay_getState();
-			if (state == NETPLAY_STATE_SYNCING || Netplay_isConnected()) {
-				connected = 1;
-				break;
-			}
-
-			PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
-
-			// Draw clean UI similar to hotspot mode
-			GFX_clear(screen);
-			GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-
-			SDL_Surface* text;
-			int text_w, text_h;
-			int center_x = screen->w / 2;
-			int center_y = screen->h / 2;
-
-			// Large IP (centered, prominent)
-			text = TTF_RenderUTF8_Blended(font.large, Netplay_getLocalIP(), COLOR_WHITE);
-			text_w = text->w;
-			text_h = text->h;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y - text_h});
-			SDL_FreeSurface(text);
-
-			// Medium instruction
-			text = TTF_RenderUTF8_Blended(font.medium, "Share this IP with the other device", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y + SCALE1(5)});
-			SDL_FreeSurface(text);
-
-			// Small status
-			text = TTF_RenderUTF8_Blended(font.small, "Waiting for connection...", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y + SCALE1(28)});
-			SDL_FreeSurface(text);
-
-			GFX_blitButtonGroup((char*[]){ "B","CANCEL", NULL }, 0, screen, 1);
-			GFX_flip(screen);
-			dirty = 0;
-
-			hdmimon();
-		}
-
-		// Show cancelling indicator if user pressed B
-		if (cancelled) {
-			GFX_clear(screen);
-			GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-			SDL_Surface* text = TTF_RenderUTF8_Blended(font.medium, "Cancelling...", COLOR_WHITE);
-			int text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){screen->w/2 - text_w/2, screen->h/2});
-			SDL_FreeSurface(text);
-			GFX_flip(screen);
-		}
-		GFX_setMode(MODE_MENU);
-
-		if (connected) {
-			// Show success message
-			uint32_t start_time = SDL_GetTicks();
-			GFX_setMode(MODE_MAIN);
-			while (SDL_GetTicks() - start_time < 3000) {
-				GFX_startFrame();
-				PAD_poll();
-				if (PAD_justPressed(BTN_A)) break;
-
-				GFX_clear(screen);
-				GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-
-				SDL_Surface* text;
-				int text_w;
-				int center_x = screen->w / 2;
-				int center_y = screen->h / 2;
-
-				text = TTF_RenderUTF8_Blended(font.large, "Connected!", COLOR_WHITE);
-				text_w = text->w;
-				SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y - SCALE1(20)});
-				SDL_FreeSurface(text);
-
-				text = TTF_RenderUTF8_Blended(font.medium, "Starting game...", COLOR_WHITE);
-				text_w = text->w;
-				SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y + SCALE1(20)});
-				SDL_FreeSurface(text);
-
-				GFX_flip(screen);
-				hdmimon();
-			}
-			GFX_setMode(MODE_MENU);
-
-			// Set flag to auto-close all menus
-			netplay_force_resume = 1;
-			return MENU_CALLBACK_EXIT;
-		} else {
-			Netplay_stopHost();
-		}
-	} else {
-		Menu_message("Failed to start host.\nCheck WiFi connection.", (char*[]){ "A","OKAY", NULL });
-	}
-
-	return MENU_CALLBACK_NOP;
-}
-
-static int OptionNetplay_hostGame(MenuList* list, int i) {
-	(void)list; (void)i;
-
-	if (Netplay_getMode() != NETPLAY_OFF) {
-		Menu_message("Already in netplay session.\nDisconnect first.", (char*[]){ "A","OKAY", NULL });
-		return MENU_CALLBACK_NOP;
-	}
-
-	// Show mode selection: WiFi or Hotspot
-	int selected = 0;
-	int dirty = 1;
-	int mode_selected = 0;
-	const char* modes[] = { "WiFi", "Hotspot" };
-	int mode_count = 2;
-
-	while (!mode_selected) {
-		GFX_startFrame();
-		PAD_poll();
-
-		if (PAD_justPressed(BTN_B)) {
-			return MENU_CALLBACK_NOP;  // Cancel
-		}
-
-		if (PAD_justRepeated(BTN_UP)) {
-			selected--;
-			if (selected < 0) selected = mode_count - 1;
-			dirty = 1;
-		}
-		else if (PAD_justRepeated(BTN_DOWN)) {
-			selected++;
-			if (selected >= mode_count) selected = 0;
-			dirty = 1;
-		}
-		else if (PAD_justPressed(BTN_A)) {
-			mode_selected = 1;
-		}
-
-		PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
-
-		if (dirty) {
-			GFX_clear(screen);
-			GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-
-			SDL_Surface* text;
-			int text_w;
-			int center_x = screen->w / 2;
-
-			// Title
-			int title_y = SCALE1(60);
-			text = TTF_RenderUTF8_Blended(font.large, "Host Game", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, title_y});
-			SDL_FreeSurface(text);
-
-			// Instruction
-			int instruction_y = title_y + SCALE1(30);
-			text = TTF_RenderUTF8_Blended(font.medium, "Select connection mode:", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, instruction_y});
-			SDL_FreeSurface(text);
-
-			// Mode list
-			int list_start_y = instruction_y + SCALE1(35);
-			int item_height = SCALE1(28);
-			for (int j = 0; j < mode_count; j++) {
-				char item_text[64];
-				snprintf(item_text, sizeof(item_text), "%s %s",
-						 (j == selected) ? ">" : " ", modes[j]);
-
-				text = TTF_RenderUTF8_Blended(font.medium, item_text, COLOR_WHITE);
-				text_w = text->w;
-				SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, list_start_y + j * item_height});
-				SDL_FreeSurface(text);
-			}
-
-			GFX_blitButtonGroup((char*[]){ "A","SELECT", "B","CANCEL", NULL }, 0, screen, 1);
-			GFX_flip(screen);
-			dirty = 0;
-		}
-
-		hdmimon();
-	}
-
-	// Execute selected mode
-	if (selected == 0) {
-		// WiFi mode
-		return OptionNetplay_hostGame_WiFi();
-	} else {
-		// Hotspot mode
-		return OptionNetplay_hostGame_Hotspot();
-	}
-}
-
-// Hotspot mode host (following GBA Link UI flow)
-static int OptionNetplay_hostGame_Hotspot(void) {
-	// Get game name from current ROM
-	char game_name[64] = "Unknown Game";
-	if (game.name[0]) {
-		strncpy(game_name, game.name, sizeof(game_name) - 1);
-	}
-
-	// Calculate simple CRC from game data
-	uint32_t crc = 0;
-	if (game.data && game.size > 0) {
-		const uint8_t* data = (const uint8_t*)game.data;
-		for (size_t j = 0; j < game.size && j < 1024; j++) {
-			crc = (crc << 1) ^ data[j];
-		}
-	}
-
-	// Show creating connection page
-	GFX_setMode(MODE_MAIN);
-	GFX_clear(screen);
-	GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-	{
-		SDL_Surface* text = TTF_RenderUTF8_Blended(font.medium, "Creating connection...", COLOR_WHITE);
-		int text_w = text->w;
-		SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){screen->w/2 - text_w/2, screen->h/2});
-		SDL_FreeSurface(text);
-	}
-	GFX_flip(screen);
-	GFX_setMode(MODE_MENU);
-
-	// Use hotspot for hosting
-	if (Netplay_startHostWithHotspot(game_name, crc) == 0) {
-		int dirty = 1;
-		int connected = 0;
-		int cancelled = 0;
-
-		GFX_setMode(MODE_MAIN);
-		while (1) {
-			GFX_startFrame();
-			PAD_poll();
-
-			if (PAD_justPressed(BTN_B)) {
-				cancelled = 1;
-				break;
-			}
-
-			NetplayState state = Netplay_getState();
-			if (state == NETPLAY_STATE_SYNCING || Netplay_isConnected()) {
-				connected = 1;
-				break;
-			}
-
-			PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
-
-			// Extract code from SSID (after prefix)
-			const char* ssid = PLAT_getHotspotSSID();
-			const char* code = ssid + strlen(NETPLAY_HOTSPOT_SSID_PREFIX);
-
-			// Draw darkened game background
-			GFX_clear(screen);
-			GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-
-			SDL_Surface* text;
-			int text_w, text_h;
-			int center_x = screen->w / 2;
-			int center_y = screen->h / 2;
-
-			// Large code (centered, prominent)
-			text = TTF_RenderUTF8_Blended(font.large, code, COLOR_WHITE);
-			text_w = text->w;
-			text_h = text->h;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y - text_h});
-			SDL_FreeSurface(text);
-
-			// Medium instruction
-			text = TTF_RenderUTF8_Blended(font.medium, "Select this code on the other device", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y + SCALE1(5)});
-			SDL_FreeSurface(text);
-
-			// Small status
-			text = TTF_RenderUTF8_Blended(font.small, "Waiting for connection...", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y + SCALE1(28)});
-			SDL_FreeSurface(text);
-
-			GFX_blitButtonGroup((char*[]){ "B","CANCEL", NULL }, 0, screen, 1);
-			GFX_flip(screen);
-			dirty = 0;
-
-			hdmimon();
-		}
-
-		// Show cancelling indicator if user pressed B
-		if (cancelled) {
-			GFX_clear(screen);
-			GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-			SDL_Surface* text = TTF_RenderUTF8_Blended(font.medium, "Cancelling...", COLOR_WHITE);
-			int text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){screen->w/2 - text_w/2, screen->h/2});
-			SDL_FreeSurface(text);
-			GFX_flip(screen);
-		}
-		GFX_setMode(MODE_MENU);
-
-		if (connected) {
-			uint32_t start_time = SDL_GetTicks();
-			GFX_setMode(MODE_MAIN);
-			while (SDL_GetTicks() - start_time < 3000) {
-				GFX_startFrame();
-				PAD_poll();
-				if (PAD_justPressed(BTN_A)) break;
-
-				GFX_clear(screen);
-				GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-
-				SDL_Surface* text;
-				int text_w;
-				int center_x = screen->w / 2;
-				int center_y = screen->h / 2;
-
-				text = TTF_RenderUTF8_Blended(font.large, "Connected!", COLOR_WHITE);
-				text_w = text->w;
-				SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y - SCALE1(20)});
-				SDL_FreeSurface(text);
-
-				text = TTF_RenderUTF8_Blended(font.medium, "Starting game...", COLOR_WHITE);
-				text_w = text->w;
-				SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y + SCALE1(20)});
-				SDL_FreeSurface(text);
-
-				GFX_flip(screen);
-				hdmimon();
-			}
-			GFX_setMode(MODE_MENU);
-
-			netplay_force_resume = 1;
-			return MENU_CALLBACK_EXIT;
-		} else {
-			Netplay_stopHost();
-		}
-	} else {
-		Menu_message("Failed to start hotspot.\nCheck device capabilities.", (char*[]){ "A","OKAY", NULL });
-	}
-
-	return MENU_CALLBACK_NOP;
-}
-
-// WiFi mode join (existing implementation)
-static int OptionNetplay_joinGame_WiFi(void) {
-	// Auto-enable WiFi if needed
-	if (!ensureWifiEnabled()) {
-		return MENU_CALLBACK_NOP;
-	}
-
-	// Check for network connectivity (required for WiFi mode)
-	if (!Netplay_hasNetworkConnection()) {
-		Menu_message("Network Required\n\nPlease connect to a WiFi\nnetwork before joining.",
-			(char*[]){ "A","OKAY", NULL });
-		return MENU_CALLBACK_NOP;
-	}
-
-	// Start discovery
-	if (Netplay_startDiscovery() != 0) {
-		Menu_message("Failed to start discovery.\nCheck WiFi connection.", (char*[]){ "A","OKAY", NULL });
-		return MENU_CALLBACK_NOP;
-	}
-
-	char msg[256];
-	int dirty = 1;
-	int cancelled = 0;
-	uint32_t last_poll = SDL_GetTicks();
-	netplay_host_count = 0;
-
-	// Show scanning message with dark overlay
-	GFX_setMode(MODE_MAIN);
-	GFX_clear(screen);
-	GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-	{
-		SDL_Surface* text = TTF_RenderUTF8_Blended(font.medium, "Searching for hosts...", COLOR_WHITE);
-		int text_w = text->w;
-		SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){screen->w/2 - text_w/2, screen->h/2});
-		SDL_FreeSurface(text);
-	}
-	GFX_blitButtonGroup((char*[]){ "B","CANCEL", NULL }, 0, screen, 1);
-	GFX_flip(screen);
-
-	// Auto-refresh discovery loop
-	while (1) {
-		GFX_startFrame();
-		PAD_poll();
-
-		// Check for cancellation
-		if (PAD_justPressed(BTN_B)) {
-			cancelled = 1;
-			break;
-		}
-
-		// Poll for hosts periodically (every 500ms)
-		uint32_t now = SDL_GetTicks();
-		if (now - last_poll >= 500) {
-			netplay_host_count = Netplay_getDiscoveredHosts(netplay_hosts, NETPLAY_MAX_HOSTS);
-			last_poll = now;
-
-			// Found hosts - exit loop
-			if (netplay_host_count > 0) {
-				break;
-			}
-		}
-
-		PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
-		hdmimon();
-	}
-	GFX_setMode(MODE_MENU);
-
-	Netplay_stopDiscovery();
-
-	if (cancelled || netplay_host_count == 0) {
-		if (!cancelled) {
-			Menu_message("No hosts found.\n\nMake sure:\n1. Both devices on same WiFi\n2. Host started game first",
-						 (char*[]){ "A","OKAY", NULL });
-		}
-		return MENU_CALLBACK_NOP;
-	}
-
-	// Show list of available hosts for user to select
-	int selected = 0;
-	int show_selection = 1;
-	dirty = 1;
-
-	while (show_selection) {
-		GFX_startFrame();
-		PAD_poll();
-
-		if (PAD_justPressed(BTN_B)) {
-			return MENU_CALLBACK_NOP;  // Cancel
-		}
-
-		if (PAD_justRepeated(BTN_UP)) {
-			selected--;
-			if (selected < 0) selected = netplay_host_count - 1;
-			dirty = 1;
-		}
-		else if (PAD_justRepeated(BTN_DOWN)) {
-			selected++;
-			if (selected >= netplay_host_count) selected = 0;
-			dirty = 1;
-		}
-		else if (PAD_justPressed(BTN_A)) {
-			show_selection = 0;
-		}
-
-		PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
-
-		if (dirty) {
-			GFX_clear(screen);
-			GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-
-			SDL_Surface* text;
-			int text_w;
-			int center_x = screen->w / 2;
-
-			// Calculate vertical layout
-			int title_y = SCALE1(60);
-			int instruction_y = title_y + SCALE1(30);
-			int list_start_y = instruction_y + SCALE1(35);
-			int item_height = SCALE1(28);
-
-			// Large title "Join Game"
-			text = TTF_RenderUTF8_Blended(font.large, "Join Game", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, title_y});
-			SDL_FreeSurface(text);
-
-			// Medium instruction
-			text = TTF_RenderUTF8_Blended(font.medium, "Select host to join", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, instruction_y});
-			SDL_FreeSurface(text);
-
-			// Render host list with game name and IP
-			for (int j = 0; j < netplay_host_count; j++) {
-				char item_text[128];
-				snprintf(item_text, sizeof(item_text), "%s %s (%s)",
-						 (j == selected) ? ">" : " ",
-						 netplay_hosts[j].game_name,
-						 netplay_hosts[j].host_ip);
-
-				text = TTF_RenderUTF8_Blended(font.medium, item_text, COLOR_WHITE);
-				text_w = text->w;
-				SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, list_start_y + j * item_height});
-				SDL_FreeSurface(text);
-			}
-
-			GFX_blitButtonGroup((char*[]){ "A","SELECT", "B","CANCEL", NULL }, 0, screen, 1);
-			GFX_flip(screen);
-			dirty = 0;
-		}
-
-		hdmimon();
-	}
-
-	NetplayHostInfo* host = &netplay_hosts[selected];
-
-	// Show connecting message
-	GFX_setMode(MODE_MAIN);
-	GFX_clear(screen);
-	GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-	snprintf(msg, sizeof(msg), "Connecting to %s...", host->host_ip);
-	{
-		SDL_Surface* text = TTF_RenderUTF8_Blended(font.medium, msg, COLOR_WHITE);
-		int text_w = text->w;
-		SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){screen->w/2 - text_w/2, screen->h/2});
-		SDL_FreeSurface(text);
-	}
-	GFX_flip(screen);
-	GFX_setMode(MODE_MENU);
-
-	if (Netplay_connectToHost(host->host_ip, host->port) == 0) {
-		// Show success message
-		uint32_t start_time = SDL_GetTicks();
-		GFX_setMode(MODE_MAIN);
-		while (SDL_GetTicks() - start_time < 3000) {
-			GFX_startFrame();
-			PAD_poll();
-			if (PAD_justPressed(BTN_A)) break;
-
-			GFX_clear(screen);
-			GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-
-			SDL_Surface* text;
-			int text_w;
-			int center_x = screen->w / 2;
-			int center_y = screen->h / 2;
-
-			text = TTF_RenderUTF8_Blended(font.large, "Connected!", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y - SCALE1(20)});
-			SDL_FreeSurface(text);
-
-			text = TTF_RenderUTF8_Blended(font.medium, "Starting game...", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y + SCALE1(20)});
-			SDL_FreeSurface(text);
-
-			GFX_flip(screen);
-			hdmimon();
-		}
-		GFX_setMode(MODE_MENU);
-
-		// Set flag to auto-close all menus
-		netplay_force_resume = 1;
-		return MENU_CALLBACK_EXIT;
-	} else {
-		Menu_message("Connection failed.", (char*[]){ "A","OKAY", NULL });
-	}
-
-	return MENU_CALLBACK_NOP;
-}
-
-// Hotspot mode join (following GBA Link UI flow)
-static int OptionNetplay_joinGame_Hotspot(void) {
-	// Auto-enable WiFi if needed (required to scan for hotspots)
-	if (!ensureWifiEnabled()) {
-		return MENU_CALLBACK_NOP;
-	}
-
-	char msg[256];
-	int dirty = 1;
-	netplay_connected_to_hotspot = 0;
-
-	// Show scanning message with dark overlay
-	GFX_setMode(MODE_MAIN);
-	GFX_clear(screen);
-	GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-	{
-		SDL_Surface* text = TTF_RenderUTF8_Blended(font.medium, "Scanning for Netplay hosts...", COLOR_WHITE);
-		int text_w = text->w;
-		SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){screen->w/2 - text_w/2, screen->h/2});
-		SDL_FreeSurface(text);
-	}
-	GFX_flip(screen);
-	GFX_setMode(MODE_MENU);
-
-	// Scan for all Netplay hotspots
-	char hotspots[8][33];
-	int hotspot_count = PLAT_wifiScanForHotspots(NETPLAY_HOTSPOT_SSID_PREFIX, hotspots, 8);
-
-	if (hotspot_count == 0) {
-		Menu_message("No Netplay host found.\n\nMake sure the host has\nstarted hosting first.",
-			(char*[]){ "A","OKAY", NULL });
-		return MENU_CALLBACK_NOP;
-	}
-
-	// Show list of available hosts for user to select
-	char selected_ssid[33];
-	int selected = 0;
-	int show_selection = 1;
-	size_t prefix_len = strlen(NETPLAY_HOTSPOT_SSID_PREFIX);
-
-	while (show_selection) {
-		GFX_startFrame();
-		PAD_poll();
-
-		if (PAD_justPressed(BTN_B)) {
-			return MENU_CALLBACK_NOP;  // Cancel
-		}
-
-		if (PAD_justRepeated(BTN_UP)) {
-			selected--;
-			if (selected < 0) selected = hotspot_count - 1;
-			dirty = 1;
-		}
-		else if (PAD_justRepeated(BTN_DOWN)) {
-			selected++;
-			if (selected >= hotspot_count) selected = 0;
-			dirty = 1;
-		}
-		else if (PAD_justPressed(BTN_A)) {
-			strncpy(selected_ssid, hotspots[selected], sizeof(selected_ssid) - 1);
-			selected_ssid[32] = '\0';
-			show_selection = 0;
-		}
-
-		PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
-
-		if (dirty) {
-			GFX_clear(screen);
-			GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-
-			SDL_Surface* text;
-			int text_w;
-			int center_x = screen->w / 2;
-
-			// Calculate vertical layout - tighter spacing
-			int title_y = SCALE1(60);
-			int instruction_y = title_y + SCALE1(30);
-			int list_start_y = instruction_y + SCALE1(35);
-			int item_height = SCALE1(28);
-
-			// Large title "Join Game"
-			text = TTF_RenderUTF8_Blended(font.large, "Join Game", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, title_y});
-			SDL_FreeSurface(text);
-
-			// Medium instruction
-			text = TTF_RenderUTF8_Blended(font.medium, "Select code displayed on the host device", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, instruction_y});
-			SDL_FreeSurface(text);
-
-			// Render code list with medium font and white color
-			for (int j = 0; j < hotspot_count; j++) {
-				const char* code = hotspots[j] + prefix_len;
-				char item_text[64];
-				snprintf(item_text, sizeof(item_text), "%s %s",
-						 (j == selected) ? ">" : " ", code[0] ? code : "????");
-
-				text = TTF_RenderUTF8_Blended(font.medium, item_text, COLOR_WHITE);
-				text_w = text->w;
-				SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, list_start_y + j * item_height});
-				SDL_FreeSurface(text);
-			}
-
-			GFX_blitButtonGroup((char*[]){ "A","SELECT", "B","CANCEL", NULL }, 0, screen, 1);
-			GFX_flip(screen);
-			dirty = 0;
-		}
-
-		hdmimon();
-	}
-
-	const char* hotspot_pass = PLAT_getHotspotPassword();
-
-	// Connect to selected hotspot
-	GFX_setMode(MODE_MAIN);
-	GFX_clear(screen);
-	GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-	const char* selected_code = selected_ssid + prefix_len;
-	snprintf(msg, sizeof(msg), "Connecting to %s...", selected_code[0] ? selected_code : "????");
-	{
-		SDL_Surface* text = TTF_RenderUTF8_Blended(font.medium, msg, COLOR_WHITE);
-		int text_w = text->w;
-		SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){screen->w/2 - text_w/2, screen->h/2});
-		SDL_FreeSurface(text);
-	}
-	GFX_flip(screen);
-	GFX_setMode(MODE_MENU);
-
-	if (PLAT_wifiConnectToSSID(selected_ssid, hotspot_pass) != 0) {
-		Menu_message("Failed to connect to host.",
-			(char*[]){ "A","OKAY", NULL });
-		return MENU_CALLBACK_NOP;
-	}
-
-	netplay_connected_to_hotspot = 1;
-
-	// On hotspot network, host is always at fixed IP - connect directly (no discovery needed)
-	const char* host_ip = PLAT_getHotspotIP();
-
-	// Show establishing link message
-	GFX_setMode(MODE_MAIN);
-	GFX_clear(screen);
-	GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-	{
-		SDL_Surface* text = TTF_RenderUTF8_Blended(font.medium, "Establishing link...", COLOR_WHITE);
-		int text_w = text->w;
-		SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){screen->w/2 - text_w/2, screen->h/2});
-		SDL_FreeSurface(text);
-	}
-	GFX_flip(screen);
-	GFX_setMode(MODE_MENU);
-
-	if (Netplay_connectToHost(host_ip, NETPLAY_DEFAULT_PORT) != 0) {
-		Menu_message("Failed to connect to host.\n\nConnection timed out.",
-			(char*[]){ "A","OKAY", NULL });
-		// Restore previous WiFi connection
-		PLAT_wifiRestorePreviousConnection();
-		netplay_connected_to_hotspot = 0;
-		return MENU_CALLBACK_NOP;
-	}
-
-	// Show success
-	uint32_t start_time = SDL_GetTicks();
-	GFX_setMode(MODE_MAIN);
-	while (SDL_GetTicks() - start_time < 3000) {
-		GFX_startFrame();
-		PAD_poll();
-		if (PAD_justPressed(BTN_A)) break;
-
-		GFX_clear(screen);
-		GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-
-		SDL_Surface* text;
-		int text_w;
-		int center_x = screen->w / 2;
-		int center_y = screen->h / 2;
-
-		text = TTF_RenderUTF8_Blended(font.large, "Connected!", COLOR_WHITE);
-		text_w = text->w;
-		SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y - SCALE1(20)});
-		SDL_FreeSurface(text);
-
-		text = TTF_RenderUTF8_Blended(font.medium, "Starting game...", COLOR_WHITE);
-		text_w = text->w;
-		SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y + SCALE1(20)});
-		SDL_FreeSurface(text);
-
-		GFX_flip(screen);
-		hdmimon();
-	}
-	GFX_setMode(MODE_MENU);
-
-	netplay_force_resume = 1;
-	return MENU_CALLBACK_EXIT;
-}
-
-static int OptionNetplay_joinGame(MenuList* list, int i) {
-	(void)list; (void)i;
-
-	if (Netplay_getMode() != NETPLAY_OFF) {
-		Menu_message("Already in netplay session.\nDisconnect first.", (char*[]){ "A","OKAY", NULL });
-		return MENU_CALLBACK_NOP;
-	}
-
-	// Show mode selection: WiFi or Hotspot
-	int selected = 0;
-	int dirty = 1;
-	int mode_selected = 0;
-	const char* modes[] = { "WiFi", "Hotspot" };
-	int mode_count = 2;
-
-	while (!mode_selected) {
-		GFX_startFrame();
-		PAD_poll();
-
-		if (PAD_justPressed(BTN_B)) {
-			return MENU_CALLBACK_NOP;  // Cancel
-		}
-
-		if (PAD_justRepeated(BTN_UP)) {
-			selected--;
-			if (selected < 0) selected = mode_count - 1;
-			dirty = 1;
-		}
-		else if (PAD_justRepeated(BTN_DOWN)) {
-			selected++;
-			if (selected >= mode_count) selected = 0;
-			dirty = 1;
-		}
-		else if (PAD_justPressed(BTN_A)) {
-			mode_selected = 1;
-		}
-
-		PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
-
-		if (dirty) {
-			GFX_clear(screen);
-			GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-
-			SDL_Surface* text;
-			int text_w;
-			int center_x = screen->w / 2;
-
-			// Title
-			int title_y = SCALE1(60);
-			text = TTF_RenderUTF8_Blended(font.large, "Join Game", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, title_y});
-			SDL_FreeSurface(text);
-
-			// Instruction
-			int instruction_y = title_y + SCALE1(30);
-			text = TTF_RenderUTF8_Blended(font.medium, "Select connection mode:", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, instruction_y});
-			SDL_FreeSurface(text);
-
-			// Mode list
-			int list_start_y = instruction_y + SCALE1(35);
-			int item_height = SCALE1(28);
-			for (int j = 0; j < mode_count; j++) {
-				char item_text[64];
-				snprintf(item_text, sizeof(item_text), "%s %s",
-						 (j == selected) ? ">" : " ", modes[j]);
-
-				text = TTF_RenderUTF8_Blended(font.medium, item_text, COLOR_WHITE);
-				text_w = text->w;
-				SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, list_start_y + j * item_height});
-				SDL_FreeSurface(text);
-			}
-
-			GFX_blitButtonGroup((char*[]){ "A","SELECT", "B","CANCEL", NULL }, 0, screen, 1);
-			GFX_flip(screen);
-			dirty = 0;
-		}
-
-		hdmimon();
-	}
-
-	// Execute selected mode
-	if (selected == 0) {
-		// WiFi mode
-		return OptionNetplay_joinGame_WiFi();
-	} else {
-		// Hotspot mode
-		return OptionNetplay_joinGame_Hotspot();
-	}
-}
-
-static int OptionNetplay_disconnect(MenuList* list, int i) {
-	(void)list; (void)i;
-
-	if (Netplay_getMode() == NETPLAY_OFF) {
-		Menu_message("Not in a netplay session.", (char*[]){ "A","OKAY", NULL });
-		return MENU_CALLBACK_NOP;
-	}
-
-	// Show disconnecting transition page
-	GFX_setMode(MODE_MAIN);
-	GFX_clear(screen);
-	GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-	{
-		SDL_Surface* text = TTF_RenderUTF8_Blended(font.medium, "Disconnecting...", COLOR_WHITE);
-		int text_w = text->w;
-		SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){screen->w/2 - text_w/2, screen->h/2});
-		SDL_FreeSurface(text);
-	}
-	GFX_flip(screen);
-
-	Netplay_disconnect();
-	if (Netplay_getMode() == NETPLAY_HOST) {
-		Netplay_stopHost();
-	}
-
-	// If client was connected to a netplay hotspot, restore previous WiFi
-	if (netplay_connected_to_hotspot) {
-		PLAT_wifiRestorePreviousConnection();
-		netplay_connected_to_hotspot = 0;
-	}
-
-	GFX_setMode(MODE_MENU);
-
-	// Show disconnected confirmation
-	uint32_t start_time = SDL_GetTicks();
-	GFX_setMode(MODE_MAIN);
-	while (SDL_GetTicks() - start_time < 1500) {
-		GFX_startFrame();
-		PAD_poll();
-		if (PAD_justPressed(BTN_A) || PAD_justPressed(BTN_B)) break;
-
-		GFX_clear(screen);
-		GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-
-		SDL_Surface* text;
-		int text_w;
-		int center_x = screen->w / 2;
-		int center_y = screen->h / 2;
-
-		text = TTF_RenderUTF8_Blended(font.large, "Disconnected", COLOR_WHITE);
-		text_w = text->w;
-		SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y});
-		SDL_FreeSurface(text);
-
-		GFX_flip(screen);
-		hdmimon();
-	}
-	GFX_setMode(MODE_MENU);
-
-	return MENU_CALLBACK_NOP;
-}
-
-static int OptionNetplay_status(MenuList* list, int i) {
-	(void)list; (void)i;
-
-	char msg[384];
-	const char* mode_str = "Off";
-	const char* state_str = "Idle";
-	const char* conn_str = "";
-
-	switch (Netplay_getMode()) {
-		case NETPLAY_HOST: mode_str = "Host"; break;
-		case NETPLAY_CLIENT: mode_str = "Client"; break;
-		default: mode_str = "Off"; break;
-	}
-
-	switch (Netplay_getState()) {
-		case NETPLAY_STATE_WAITING: state_str = "Waiting for player"; break;
-		case NETPLAY_STATE_CONNECTING: state_str = "Connecting"; break;
-		case NETPLAY_STATE_SYNCING: state_str = "Connected"; break;
-		case NETPLAY_STATE_PLAYING: state_str = "Playing"; break;
-		case NETPLAY_STATE_STALLED: state_str = "Playing (stalled)"; break;
-		case NETPLAY_STATE_DISCONNECTED: state_str = "Disconnected"; break;
-		case NETPLAY_STATE_ERROR: state_str = "Error"; break;
-		default: state_str = "Idle"; break;
-	}
-
-	// Show connection type
-	if (Netplay_getMode() != NETPLAY_OFF) {
-		if (Netplay_isUsingHotspot()) {
-			conn_str = "Hotspot";
-		} else if (netplay_connected_to_hotspot) {
-			conn_str = "Hotspot";
-		} else {
-			conn_str = "WiFi";
-		}
-	}
-
-	if (Netplay_isUsingHotspot() && Netplay_getMode() == NETPLAY_HOST) {
-		// Host with hotspot - show code
-		const char* ssid = PLAT_getHotspotSSID();
-		const char* code = ssid + strlen(NETPLAY_HOTSPOT_SSID_PREFIX);
-		snprintf(msg, sizeof(msg), "Netplay Status\n\nMode: %s (%s)\nState: %s\nCode: %s\nIP: %s\n\n%s",
-				 mode_str, conn_str, state_str, code, Netplay_getLocalIP(), Netplay_getStatusMessage());
-	} else if (conn_str[0]) {
-		snprintf(msg, sizeof(msg), "Netplay Status\n\nMode: %s (%s)\nState: %s\nLocal IP: %s\n\n%s",
-				 mode_str, conn_str, state_str, Netplay_getLocalIP(), Netplay_getStatusMessage());
-	} else {
-		snprintf(msg, sizeof(msg), "Netplay Status\n\nMode: %s\nState: %s\nLocal IP: %s\n\n%s",
-				 mode_str, state_str, Netplay_getLocalIP(), Netplay_getStatusMessage());
-	}
-
-	Menu_message(msg, (char*[]){ "A","OKAY", NULL });
-	return MENU_CALLBACK_NOP;
-}
-
-// Custom netplay menu with main menu style
-static int Menu_netplay(void) {
-	// Reset force resume flag
-	netplay_force_resume = 0;
-
-	// Note: Connectivity check moved to WiFi-specific functions
-	// Hotspot mode doesn't require existing WiFi connection
-
-	int dirty = 1;
-	int show_menu = 1;
-	int selected = 0;
-
-	while (show_menu) {
-		// Build menu items dynamically based on connection state
-		int is_connected = (Netplay_getMode() != NETPLAY_OFF);
-
-		// Menu items: [Host, Join if not connected], [Disconnect if connected], Status
-		char* items[5];
-		int (*callbacks[5])(MenuList*, int);
-		int item_count = 0;
-
-		if (!is_connected) {
-			items[item_count] = "Host Game";
-			callbacks[item_count] = OptionNetplay_hostGame;
-			item_count++;
-
-			items[item_count] = "Join Game";
-			callbacks[item_count] = OptionNetplay_joinGame;
-			item_count++;
-		} else {
-			items[item_count] = "Disconnect";
-			callbacks[item_count] = OptionNetplay_disconnect;
-			item_count++;
-		}
-
-		items[item_count] = "Status";
-		callbacks[item_count] = OptionNetplay_status;
-		item_count++;
-
-		// Clamp selection if items changed
-		if (selected >= item_count) selected = item_count - 1;
-
-		GFX_startFrame();
-		PAD_poll();
-
-		if (PAD_justRepeated(BTN_UP)) {
-			selected--;
-			if (selected < 0) selected = item_count - 1;
-			dirty = 1;
-		}
-		else if (PAD_justRepeated(BTN_DOWN)) {
-			selected++;
-			if (selected >= item_count) selected = 0;
-			dirty = 1;
-		}
-		else if (PAD_justPressed(BTN_B)) {
-			show_menu = 0;
-		}
-		else if (PAD_justPressed(BTN_A)) {
-			int result = callbacks[selected](NULL, selected);
-			if (result == MENU_CALLBACK_EXIT || netplay_force_resume) {
-				show_menu = 0;
-			}
-			dirty = 1;
-		}
-
-		// Check if we should auto-close (connection established)
-		if (netplay_force_resume) {
-			show_menu = 0;
-		}
-
-		PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
-
-		if (dirty) {
-			GFX_clear(screen);
-
-			// Draw dimmed game background
-			GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.4f, 1, 0);
-
-			// Title
-			SDL_Surface* text;
-			text = TTF_RenderUTF8_Blended(font.large, "Netplay", uintToColour(THEME_COLOR6_255));
-			int title_w = text->w + SCALE1(BUTTON_PADDING * 2);
-			GFX_blitPillLight(ASSET_WHITE_PILL, screen, &(SDL_Rect){
-				SCALE1(PADDING),
-				SCALE1(PADDING),
-				title_w,
-				SCALE1(PILL_SIZE)
-			});
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){
-				SCALE1(PADDING + BUTTON_PADDING),
-				SCALE1(PADDING + 4)
-			});
-			SDL_FreeSurface(text);
-
-			// Button hints
-			GFX_blitButtonGroup((char*[]){ "B","BACK", "A","OKAY", NULL }, 1, screen, 1);
-
-			// Menu items - centered vertically
-			int oy = (((DEVICE_HEIGHT / FIXED_SCALE) - PADDING * 2) - (item_count * PILL_SIZE)) / 2;
-			for (int i = 0; i < item_count; i++) {
-				char* item = items[i];
-				SDL_Color text_color = COLOR_WHITE;
-
-				if (i == selected) {
-					text_color = uintToColour(THEME_COLOR5_255);
-
-					int ow;
-					TTF_SizeUTF8(font.large, item, &ow, NULL);
-					ow += SCALE1(BUTTON_PADDING * 2);
-
-					// Selected pill background
-					GFX_blitPillDark(ASSET_WHITE_PILL, screen, &(SDL_Rect){
-						SCALE1(PADDING),
-						SCALE1(oy + PADDING + (i * PILL_SIZE)),
-						ow,
-						SCALE1(PILL_SIZE)
-					});
-				}
-
-				// Text
-				text = TTF_RenderUTF8_Blended(font.large, item, text_color);
-				SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){
-					SCALE1(PADDING + BUTTON_PADDING),
-					SCALE1(oy + PADDING + (i * PILL_SIZE) + 4)
-				});
-				SDL_FreeSurface(text);
-			}
-
-			GFX_flip(screen);
-			dirty = 0;
-		}
-
-		hdmimon();
-	}
-
-	// Return 1 if we should auto-close parent menus (connection established)
-	return netplay_force_resume;
-}
-
-static MenuList OptionNetplay_menu = {
-	.type = MENU_LIST,
-	.items = (MenuItem[]) {
-		{"Host Game", "Start hosting for P2 to join", .on_confirm=OptionNetplay_hostGame},
-		{"Join Game", "Find and join a host", .on_confirm=OptionNetplay_joinGame},
-		{"Disconnect", "End netplay session", .on_confirm=OptionNetplay_disconnect},
-		{"Status", "View netplay status", .on_confirm=OptionNetplay_status},
-		{NULL},
-	}
-};
-
-static int OptionNetplay_openMenu(MenuList* list, int i) {
-	(void)list; (void)i;
-	int result = Menu_netplay();
-	// If connection established, exit all menus to resume game
-	if (result || netplay_force_resume) {
-		return MENU_CALLBACK_EXIT;
-	}
-	return MENU_CALLBACK_NOP;
-}
-
-///////////////////////////////
-// GBA Link Menu (for netpacket-enabled cores)
-///////////////////////////////
-
-static GBALinkHostInfo gbalink_hosts[GBALINK_MAX_HOSTS];
-static int gbalink_host_count = 0;
-static int gbalink_force_resume = 0;
-static int gbalink_connected_to_hotspot = 0;  // Track if client connected to GBALink hotspot
-
-static int OptionGBALink_hostSession(MenuList* list, int i) {
-	(void)list; (void)i;
-
-	if (GBALink_getMode() != GBALINK_OFF) {
-		Menu_message("Already in GBA Link session.\nDisconnect first.", (char*[]){ "A","OKAY", NULL });
-		return MENU_CALLBACK_NOP;
-	}
-
-	// Get game name from current ROM
-	char game_name[64] = "Unknown Game";
-	if (game.name[0]) {
-		strncpy(game_name, game.name, sizeof(game_name) - 1);
-	}
-
-	// Calculate simple CRC from game data
-	uint32_t crc = 0;
-	if (game.data && game.size > 0) {
-		const uint8_t* data = (const uint8_t*)game.data;
-		for (size_t j = 0; j < game.size && j < 1024; j++) {
-			crc = (crc << 1) ^ data[j];
-		}
-	}
-
-	// Show creating connection page
-	GFX_setMode(MODE_MAIN);
-	GFX_clear(screen);
-	GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-	{
-		SDL_Surface* text = TTF_RenderUTF8_Blended(font.medium, "Creating connection...", COLOR_WHITE);
-		int text_w = text->w;
-		SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){screen->w/2 - text_w/2, screen->h/2});
-		SDL_FreeSurface(text);
-	}
-	GFX_flip(screen);
-	GFX_setMode(MODE_MENU);
-
-	// Always use hotspot for GBA Link hosting
-	if (GBALink_startHostWithHotspot(game_name, crc) == 0) {
-		char msg[256];
-		int dirty = 1;
-		int connected = 0;
-
-		int cancelled = 0;
-		GFX_setMode(MODE_MAIN);
-		while (1) {
-			GFX_startFrame();
-			PAD_poll();
-
-			if (PAD_justPressed(BTN_B)) {
-				cancelled = 1;
-				break;
-			}
-
-			GBALinkState state = GBALink_getState();
-			if (state == GBALINK_STATE_CONNECTED) {
-				connected = 1;
-				break;
-			}
-
-			PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
-
-			// Extract code from SSID (after prefix)
-			const char* ssid = PLAT_getHotspotSSID();
-			const char* code = ssid + strlen(PLAT_getHotspotSSIDPrefix());
-
-			// Draw darkened game background
-			GFX_clear(screen);
-			GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-
-			SDL_Surface* text;
-			int text_w, text_h;
-			int center_x = screen->w / 2;
-			int center_y = screen->h / 2;
-
-			// Large code (centered, prominent)
-			text = TTF_RenderUTF8_Blended(font.large, code, COLOR_WHITE);
-			text_w = text->w;
-			text_h = text->h;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y - text_h});
-			SDL_FreeSurface(text);
-
-			// Medium instruction
-			text = TTF_RenderUTF8_Blended(font.medium, "Select this code on the other device", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y + SCALE1(5)});
-			SDL_FreeSurface(text);
-
-			// Small status
-			text = TTF_RenderUTF8_Blended(font.small, "Waiting for connection...", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y + SCALE1(28)});
-			SDL_FreeSurface(text);
-
-			GFX_blitButtonGroup((char*[]){ "B","CANCEL", NULL }, 0, screen, 1);
-			GFX_flip(screen);
-			dirty = 0;
-
-			hdmimon();
-		}
-
-		// Show cancelling indicator if user pressed B
-		if (cancelled) {
-			GFX_clear(screen);
-			GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-			SDL_Surface* text = TTF_RenderUTF8_Blended(font.medium, "Cancelling...", COLOR_WHITE);
-			int text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){screen->w/2 - text_w/2, screen->h/2});
-			SDL_FreeSurface(text);
-			GFX_flip(screen);
-		}
-		GFX_setMode(MODE_MENU);
-
-		if (connected) {
-			uint32_t start_time = SDL_GetTicks();
-			GFX_setMode(MODE_MAIN);
-			while (SDL_GetTicks() - start_time < 3000) {
-				GFX_startFrame();
-				PAD_poll();
-				if (PAD_justPressed(BTN_A)) break;
-
-				GFX_clear(screen);
-				GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-
-				SDL_Surface* text;
-				int text_w;
-				int center_x = screen->w / 2;
-				int center_y = screen->h / 2;
-
-				text = TTF_RenderUTF8_Blended(font.large, "Connected!", COLOR_WHITE);
-				text_w = text->w;
-				SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y - SCALE1(20)});
-				SDL_FreeSurface(text);
-
-				text = TTF_RenderUTF8_Blended(font.medium, "Starting game...", COLOR_WHITE);
-				text_w = text->w;
-				SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y + SCALE1(20)});
-				SDL_FreeSurface(text);
-
-				GFX_flip(screen);
-				hdmimon();
-			}
-			GFX_setMode(MODE_MENU);
-
-			gbalink_force_resume = 1;
-			return MENU_CALLBACK_EXIT;
-		} else {
-			GBALink_stopHost();
-		}
-	} else {
-		Menu_message("Failed to start hotspot.\nCheck device capabilities.", (char*[]){ "A","OKAY", NULL });
-	}
-
-	return MENU_CALLBACK_NOP;
-}
-
-static int OptionGBALink_joinSession(MenuList* list, int i) {
-	(void)list; (void)i;
-
-	if (GBALink_getMode() != GBALINK_OFF) {
-		Menu_message("Already in GBA Link session.\nDisconnect first.", (char*[]){ "A","OKAY", NULL });
-		return MENU_CALLBACK_NOP;
-	}
-
-	// Auto-enable WiFi if needed (required to scan for hotspots)
-	if (!ensureWifiEnabled()) {
-		return MENU_CALLBACK_NOP;
-	}
-
-	char msg[256];
-	int dirty = 1;
-	int cancelled = 0;
-	gbalink_connected_to_hotspot = 0;
-
-	// Show scanning message with dark overlay
-	GFX_setMode(MODE_MAIN);
-	GFX_clear(screen);
-	GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-	{
-		SDL_Surface* text = TTF_RenderUTF8_Blended(font.medium, "Scanning for GBA Link hosts...", COLOR_WHITE);
-		int text_w = text->w;
-		SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){screen->w/2 - text_w/2, screen->h/2});
-		SDL_FreeSurface(text);
-	}
-	GFX_flip(screen);
-	GFX_setMode(MODE_MENU);
-
-	// Scan for all GBALink hotspots
-	char hotspots[8][33];
-	int hotspot_count = PLAT_wifiScanForGBALinkHotspots(hotspots, 8);
-
-	if (hotspot_count == 0) {
-		Menu_message("No GBA Link host found.\n\nMake sure the host has\nstarted a link session first.",
-			(char*[]){ "A","OKAY", NULL });
-		return MENU_CALLBACK_NOP;
-	}
-
-	// Always show list of available hosts for user to select
-	char selected_ssid[33];
-	int selected = 0;
-	int show_selection = 1;
-	const char* prefix = PLAT_getHotspotSSIDPrefix();
-	size_t prefix_len = strlen(prefix);
-
-	while (show_selection) {
-		GFX_startFrame();
-		PAD_poll();
-
-		if (PAD_justPressed(BTN_B)) {
-			return MENU_CALLBACK_NOP;  // Cancel
-		}
-
-		if (PAD_justRepeated(BTN_UP)) {
-			selected--;
-			if (selected < 0) selected = hotspot_count - 1;
-			dirty = 1;
-		}
-		else if (PAD_justRepeated(BTN_DOWN)) {
-			selected++;
-			if (selected >= hotspot_count) selected = 0;
-			dirty = 1;
-		}
-		else if (PAD_justPressed(BTN_A)) {
-			strncpy(selected_ssid, hotspots[selected], sizeof(selected_ssid) - 1);
-			selected_ssid[32] = '\0';
-			show_selection = 0;
-		}
-
-		PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
-
-		if (dirty) {
-			GFX_clear(screen);
-			GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-
-			SDL_Surface* text;
-			int text_w;
-			int center_x = screen->w / 2;
-
-			// Calculate vertical layout - tighter spacing
-			int title_y = SCALE1(60);
-			int instruction_y = title_y + SCALE1(30);
-			int list_start_y = instruction_y + SCALE1(35);
-			int item_height = SCALE1(28);
-
-			// Large title "Join Game"
-			text = TTF_RenderUTF8_Blended(font.large, "Join Game", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, title_y});
-			SDL_FreeSurface(text);
-
-			// Medium instruction
-			text = TTF_RenderUTF8_Blended(font.medium, "Select code displayed on the host device", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, instruction_y});
-			SDL_FreeSurface(text);
-
-			// Render code list with medium font and white color
-			for (int j = 0; j < hotspot_count; j++) {
-				const char* code = hotspots[j] + prefix_len;
-				char item_text[64];
-				snprintf(item_text, sizeof(item_text), "%s %s",
-						 (j == selected) ? ">" : " ", code[0] ? code : "????");
-
-				text = TTF_RenderUTF8_Blended(font.medium, item_text, COLOR_WHITE);
-				text_w = text->w;
-				SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, list_start_y + j * item_height});
-				SDL_FreeSurface(text);
-			}
-
-			GFX_blitButtonGroup((char*[]){ "A","SELECT", "B","CANCEL", NULL }, 0, screen, 1);
-			GFX_flip(screen);
-			dirty = 0;
-		}
-
-		hdmimon();
-	}
-
-	const char* hotspot_pass = PLAT_getHotspotPassword();
-
-	// Connect to selected hotspot
-	GFX_setMode(MODE_MAIN);
-	GFX_clear(screen);
-	GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-	const char* selected_code = selected_ssid + prefix_len;
-	snprintf(msg, sizeof(msg), "Connecting to %s...", selected_code[0] ? selected_code : "????");
-	{
-		SDL_Surface* text = TTF_RenderUTF8_Blended(font.medium, msg, COLOR_WHITE);
-		int text_w = text->w;
-		SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){screen->w/2 - text_w/2, screen->h/2});
-		SDL_FreeSurface(text);
-	}
-	GFX_flip(screen);
-	GFX_setMode(MODE_MENU);
-
-	if (PLAT_wifiConnectToSSID(selected_ssid, hotspot_pass) != 0) {
-		Menu_message("Failed to connect to host.",
-			(char*[]){ "A","OKAY", NULL });
-		return MENU_CALLBACK_NOP;
-	}
-
-	gbalink_connected_to_hotspot = 1;
-
-	// On hotspot network, host is always at fixed IP - connect directly (no discovery needed)
-	const char* host_ip = PLAT_getHotspotIP();
-
-	GFX_setMode(MODE_MAIN);
-	GFX_clear(screen);
-	GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-	{
-		SDL_Surface* text = TTF_RenderUTF8_Blended(font.medium, "Establishing link...", COLOR_WHITE);
-		int text_w = text->w;
-		SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){screen->w/2 - text_w/2, screen->h/2});
-		SDL_FreeSurface(text);
-	}
-	GFX_flip(screen);
-	GFX_setMode(MODE_MENU);
-
-	if (GBALink_connectToHost(host_ip, GBALINK_DEFAULT_PORT) == 0) {
-		uint32_t start_time = SDL_GetTicks();
-		GFX_setMode(MODE_MAIN);
-		while (SDL_GetTicks() - start_time < 3000) {
-			GFX_startFrame();
-			PAD_poll();
-			if (PAD_justPressed(BTN_A)) break;
-
-			GFX_clear(screen);
-			GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-
-			SDL_Surface* text;
-			int text_w;
-			int center_x = screen->w / 2;
-			int center_y = screen->h / 2;
-
-			text = TTF_RenderUTF8_Blended(font.large, "Connected!", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y - SCALE1(20)});
-			SDL_FreeSurface(text);
-
-			text = TTF_RenderUTF8_Blended(font.medium, "Starting game...", COLOR_WHITE);
-			text_w = text->w;
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y + SCALE1(20)});
-			SDL_FreeSurface(text);
-
-			GFX_flip(screen);
-			hdmimon();
-		}
-		GFX_setMode(MODE_MENU);
-
-		gbalink_force_resume = 1;
-		return MENU_CALLBACK_EXIT;
-	}
-
-	// Connection failed - restore previous WiFi
-	Menu_message("Connection failed.", (char*[]){ "A","OKAY", NULL });
-	PLAT_wifiRestorePreviousConnection();
-	gbalink_connected_to_hotspot = 0;
-
-	return MENU_CALLBACK_NOP;
-}
-
-static int OptionGBALink_disconnect(MenuList* list, int i) {
-	(void)list; (void)i;
-
-	if (GBALink_getMode() == GBALINK_OFF) {
-		Menu_message("Not in a GBA Link session.", (char*[]){ "A","OKAY", NULL });
-		return MENU_CALLBACK_NOP;
-	}
-
-	// Show disconnecting transition page
-	GFX_setMode(MODE_MAIN);
-	GFX_clear(screen);
-	GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-	{
-		SDL_Surface* text = TTF_RenderUTF8_Blended(font.medium, "Disconnecting...", COLOR_WHITE);
-		int text_w = text->w;
-		SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){screen->w/2 - text_w/2, screen->h/2});
-		SDL_FreeSurface(text);
-	}
-	GFX_flip(screen);
-
-	GBALink_disconnect();
-	if (GBALink_getMode() == GBALINK_HOST) {
-		GBALink_stopHost();
-	}
-
-	// Restore previous WiFi connection if client had connected to hotspot
-	if (gbalink_connected_to_hotspot) {
-		PLAT_wifiRestorePreviousConnection();
-		gbalink_connected_to_hotspot = 0;
-	}
-
-	GFX_setMode(MODE_MENU);
-
-	// Show disconnected confirmation
-	uint32_t start_time = SDL_GetTicks();
-	GFX_setMode(MODE_MAIN);
-	while (SDL_GetTicks() - start_time < 1500) {
-		GFX_startFrame();
-		PAD_poll();
-		if (PAD_justPressed(BTN_A) || PAD_justPressed(BTN_B)) break;
-
-		GFX_clear(screen);
-		GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.25f, 1, 0);
-
-		SDL_Surface* text;
-		int text_w;
-		int center_x = screen->w / 2;
-		int center_y = screen->h / 2;
-
-		text = TTF_RenderUTF8_Blended(font.large, "Disconnected", COLOR_WHITE);
-		text_w = text->w;
-		SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, center_y});
-		SDL_FreeSurface(text);
-
-		GFX_flip(screen);
-		hdmimon();
-	}
-	GFX_setMode(MODE_MENU);
-
-	return MENU_CALLBACK_NOP;
-}
-
-static int OptionGBALink_status(MenuList* list, int i) {
-	(void)list; (void)i;
-
-	char msg[384];
-	const char* mode_str = "Off";
-	const char* state_str = "Idle";
-	const char* conn_str = "";
-
-	switch (GBALink_getMode()) {
-		case GBALINK_HOST: mode_str = "Host"; break;
-		case GBALINK_CLIENT: mode_str = "Client"; break;
-		default: mode_str = "Off"; break;
-	}
-
-	switch (GBALink_getState()) {
-		case GBALINK_STATE_WAITING: state_str = "Waiting for link"; break;
-		case GBALINK_STATE_CONNECTING: state_str = "Connecting"; break;
-		case GBALINK_STATE_CONNECTED: state_str = "Connected"; break;
-		case GBALINK_STATE_DISCONNECTED: state_str = "Disconnected"; break;
-		case GBALINK_STATE_ERROR: state_str = "Error"; break;
-		default: state_str = "Idle"; break;
-	}
-
-	if (GBALink_isUsingHotspot()) {
-		conn_str = "Hotspot";
-	} else if (gbalink_connected_to_hotspot) {
-		conn_str = "Via Hotspot";
-	} else if (GBALink_getMode() != GBALINK_OFF) {
-		conn_str = "WiFi";
-	}
-
-	if (GBALink_isUsingHotspot()) {
-		const char* ssid = PLAT_getHotspotSSID();
-		const char* code = ssid + strlen(PLAT_getHotspotSSIDPrefix());
-		snprintf(msg, sizeof(msg), "GBA Link Status\n\nMode: %s (%s)\nState: %s\nCode: %s\nIP: %s\n\n%s",
-				 mode_str, conn_str, state_str, code, GBALink_getLocalIP(), GBALink_getStatusMessage());
-	} else {
-		snprintf(msg, sizeof(msg), "GBA Link Status\n\nMode: %s%s%s\nState: %s\nLocal IP: %s\n\n%s",
-				 mode_str, conn_str[0] ? " (" : "", conn_str, state_str, GBALink_getLocalIP(), GBALink_getStatusMessage());
-	}
-
-	Menu_message(msg, (char*[]){ "A","OKAY", NULL });
-	return MENU_CALLBACK_NOP;
-}
-
-static int Menu_gbalink(void) {
-	gbalink_force_resume = 0;
-
-	// Allow access even without WiFi - hotspot mode doesn't need existing connection
-	// The individual options will handle network requirements appropriately
-
-	int dirty = 1;
-	int show_menu = 1;
-	int selected = 0;
-
-	while (show_menu) {
-		int is_connected = (GBALink_getMode() != GBALINK_OFF);
-
-		char* items[5];
-		int (*callbacks[5])(MenuList*, int);
-		int item_count = 0;
-
-		if (!is_connected) {
-			items[item_count] = "Host Session";
-			callbacks[item_count] = OptionGBALink_hostSession;
-			item_count++;
-
-			items[item_count] = "Join Session";
-			callbacks[item_count] = OptionGBALink_joinSession;
-			item_count++;
-		} else {
-			items[item_count] = "Disconnect";
-			callbacks[item_count] = OptionGBALink_disconnect;
-			item_count++;
-		}
-
-		items[item_count] = "Status";
-		callbacks[item_count] = OptionGBALink_status;
-		item_count++;
-
-		if (selected >= item_count) selected = item_count - 1;
-
-		GFX_startFrame();
-		PAD_poll();
-
-		if (PAD_justRepeated(BTN_UP)) {
-			selected--;
-			if (selected < 0) selected = item_count - 1;
-			dirty = 1;
-		}
-		else if (PAD_justRepeated(BTN_DOWN)) {
-			selected++;
-			if (selected >= item_count) selected = 0;
-			dirty = 1;
-		}
-		else if (PAD_justPressed(BTN_B)) {
-			show_menu = 0;
-		}
-		else if (PAD_justPressed(BTN_A)) {
-			int result = callbacks[selected](NULL, selected);
-			if (result == MENU_CALLBACK_EXIT || gbalink_force_resume) {
-				show_menu = 0;
-			}
-			dirty = 1;
-		}
-
-		if (gbalink_force_resume) {
-			show_menu = 0;
-		}
-
-		PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
-
-		if (dirty) {
-			GFX_clear(screen);
-			GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.4f, 1, 0);
-
-			SDL_Surface* text;
-			text = TTF_RenderUTF8_Blended(font.large, "GBA Link", uintToColour(THEME_COLOR6_255));
-			int title_w = text->w + SCALE1(BUTTON_PADDING * 2);
-			GFX_blitPillLight(ASSET_WHITE_PILL, screen, &(SDL_Rect){
-				SCALE1(PADDING),
-				SCALE1(PADDING),
-				title_w,
-				SCALE1(PILL_SIZE)
-			});
-			SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){
-				SCALE1(PADDING + BUTTON_PADDING),
-				SCALE1(PADDING + 4)
-			});
-			SDL_FreeSurface(text);
-
-			GFX_blitButtonGroup((char*[]){ "B","BACK", "A","OKAY", NULL }, 1, screen, 1);
-
-			int oy = (((DEVICE_HEIGHT / FIXED_SCALE) - PADDING * 2) - (item_count * PILL_SIZE)) / 2;
-			for (int i = 0; i < item_count; i++) {
-				char* item = items[i];
-				SDL_Color text_color = COLOR_WHITE;
-
-				if (i == selected) {
-					text_color = uintToColour(THEME_COLOR5_255);
-
-					int ow;
-					TTF_SizeUTF8(font.large, item, &ow, NULL);
-					ow += SCALE1(BUTTON_PADDING * 2);
-
-					GFX_blitPillDark(ASSET_WHITE_PILL, screen, &(SDL_Rect){
-						SCALE1(PADDING),
-						SCALE1(oy + PADDING + (i * PILL_SIZE)),
-						ow,
-						SCALE1(PILL_SIZE)
-					});
-				}
-
-				text = TTF_RenderUTF8_Blended(font.large, item, text_color);
-				SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){
-					SCALE1(PADDING + BUTTON_PADDING),
-					SCALE1(oy + PADDING + (i * PILL_SIZE) + 4)
-				});
-				SDL_FreeSurface(text);
-			}
-
-			GFX_flip(screen);
-			dirty = 0;
-		}
-
-		hdmimon();
-	}
-
-	return gbalink_force_resume;
-}
-
-///////////////////////////////
-
 static MenuList options_menu = {
 	.type = MENU_LIST,
 	.items = (MenuItem[]) {
@@ -7821,6 +5978,7 @@ static MenuList options_menu = {
 		{"Controls",.on_confirm=OptionControls_openMenu},
 		{"Shortcuts",.on_confirm=OptionShortcuts_openMenu},
 		{"Save Changes",.on_confirm=OptionSaveChanges_openMenu},
+		{NULL},
 		{NULL},
 	}
 };
@@ -8274,13 +6432,13 @@ static int Menu_options(MenuList* list) {
 				w,h
 			});
 		}
-		
+
 		GFX_flip(screen);
 		dirty = 0;
-		
+
 		hdmimon();
 	}
-	
+
 	// GFX_clearAll();
 	// GFX_flip(screen);
 
@@ -8512,9 +6670,8 @@ static void Menu_screenshot(void) {
 	screenshotsavethread = SDL_CreateThread(save_screenshot_thread, "SaveScreenshotThread", args);
 }
 static void Menu_saveState(void) {
-	// Block save states during GBA Link - causes instant connection breaks
-	if (GBALink_isConnected()) {
-		LOG_info("Save state blocked - GBA Link active\n");
+	// Block save states during multiplayer - causes connection breaks
+	if (GBALink_isConnected() || GBLink_isConnected() || Netplay_isConnected()) {
 		return;
 	}
 
@@ -8549,9 +6706,8 @@ static void Menu_saveState(void) {
 	State_write();
 }
 static void Menu_loadState(void) {
-	// Block load states during GBA Link - causes instant connection breaks
-	if (GBALink_isConnected()) {
-		LOG_info("Load state blocked - GBA Link active\n");
+	// Block load states during multiplayer - causes connection breaks
+	if (GBALink_isConnected() || GBLink_isConnected() || Netplay_isConnected()) {
 		return;
 	}
 
@@ -8661,18 +6817,22 @@ static void Menu_loop(void) {
 			Netplay_pollWhilePaused();
 		}
 
+		// Check if multiplayer is active (to skip Save/Load items)
+		int mp_active = GBALink_isConnected() || GBLink_isConnected() || Netplay_isConnected();
 		if (PAD_justPressed(BTN_UP)) {
-			selected -= 1;
-			// Skip ITEM_NETPLAY if core doesn't support netplay (e.g., mGBA)
-			if (!core.show_netplay && selected == ITEM_NETPLAY) selected -= 1;
-			if (selected<0) selected += MENU_ITEM_COUNT;
+			do {
+				selected -= 1;
+				if (selected<0) selected += MENU_ITEM_COUNT;
+			} while ((!core.show_netplay && selected == ITEM_NETPLAY) ||
+			         (mp_active && (selected == ITEM_SAVE || selected == ITEM_LOAD)));
 			dirty = 1;
 		}
 		else if (PAD_justPressed(BTN_DOWN)) {
-			selected += 1;
-			// Skip ITEM_NETPLAY if core doesn't support netplay (e.g., mGBA)
-			if (!core.show_netplay && selected == ITEM_NETPLAY) selected += 1;
-			if (selected>=MENU_ITEM_COUNT) selected -= MENU_ITEM_COUNT;
+			do {
+				selected += 1;
+				if (selected>=MENU_ITEM_COUNT) selected -= MENU_ITEM_COUNT;
+			} while ((!core.show_netplay && selected == ITEM_NETPLAY) ||
+			         (mp_active && (selected == ITEM_SAVE || selected == ITEM_LOAD)));
 			dirty = 1;
 		}
 		else if (PAD_justPressed(BTN_LEFT)) {
@@ -8766,26 +6926,23 @@ static void Menu_loop(void) {
 				}
 				break;
 				case ITEM_NETPLAY:
-					// Use GBA Link menu if core supports netpacket interface (GBA games)
-					// Otherwise use regular Netplay menu (input sync)
-					if (core.has_netpacket) {
-						Menu_gbalink();
-						if (gbalink_force_resume) {
-							gbalink_force_resume = 0;
-							status = STATUS_CONT;
-							show_menu = 0;
-						}
-					} else {
-						Menu_netplay();
-						if (netplay_force_resume) {
-							netplay_force_resume = 0;
-							status = STATUS_CONT;
-							show_menu = 0;
-						}
+					{
+					// Use appropriate link menu based on core type:
+					// - GBA Link: gpSP core (netpacket interface for Wireless Adapter/RFU)
+					// - GB Link: gambatte core (built-in network serial)
+					// - Netplay: other cores (input synchronization)
+					LinkType link_type = core.has_netpacket ? LINK_TYPE_GBALINK :
+					                     core.has_gblink ? LINK_TYPE_GBLINK : LINK_TYPE_NETPLAY;
+					if (Netplay_menu_link(link_type)) {
+						status = STATUS_CONT;
+						show_menu = 0;
 					}
 					dirty = 1;
+				}
 				break;
 				case ITEM_QUIT:
+					// Link_quitAll is idempotent - safe to call again at finish: label
+					Link_quitAll();
 					status = STATUS_QUIT;
 					show_menu = 0;
 					quit = 1; // TODO: tmp?
@@ -8833,18 +6990,20 @@ static void Menu_loop(void) {
 			GFX_blitButtonGroup((char*[]){ "B","BACK", "A","OKAY", NULL }, 1, screen, 1);
 			
 			// list - calculate visible item count (may exclude netplay for some cores)
-			int visible_item_count = core.show_netplay ? MENU_ITEM_COUNT : (MENU_ITEM_COUNT - 1);
+			// Hide Save/Load during multiplayer to prevent connection breaks
+			int multiplayer_active = GBALink_isConnected() || GBLink_isConnected() || Netplay_isConnected();
+			int visible_item_count = MENU_ITEM_COUNT;
+			if (!core.show_netplay) visible_item_count--;
+			if (multiplayer_active) visible_item_count -= 2;  // Hide Save and Load
 			oy = (((DEVICE_HEIGHT / FIXED_SCALE) - PADDING * 2) - (visible_item_count * PILL_SIZE)) / 2;
 			int render_idx = 0;  // Track position for rendering (skips hidden items)
 			for (int i=0; i<MENU_ITEM_COUNT; i++) {
 				// Skip ITEM_NETPLAY if core doesn't support netplay (e.g., mGBA)
 				if (i == ITEM_NETPLAY && !core.show_netplay) continue;
+				// Skip Save/Load during multiplayer
+				if ((i == ITEM_SAVE || i == ITEM_LOAD) && multiplayer_active) continue;
 
 				char* item = menu.items[i];
-				// Show "GBA Link" instead of "Netplay" when core supports netpacket interface
-				if (i == ITEM_NETPLAY && core.has_netpacket) {
-					item = "GBA Link";
-				}
 				SDL_Color text_color = COLOR_WHITE;
 
 				if (i==selected) {
@@ -8971,8 +7130,12 @@ static void Menu_loop(void) {
 
 		setOverclock(overclock); // restore overclock value
 		if (rumble_strength) VIB_setStrength(rumble_strength);
-		
+
 		if (!HAS_POWER_BUTTON) PWR_disableSleep();
+
+		// Handle deferred reload (from link mode change dialogs)
+		// Must be done after menu cleanup to avoid graphics state conflicts
+		minarch_doPendingReload();
 	}
 	else if (exists(NOUI_PATH)) PWR_powerOff(0); // TODO: won't work with threaded core, only check this once per launch
 	
@@ -9224,99 +7387,17 @@ int main(int argc , char* argv[]) {
 
 	LOG_info("total startup time %ims\n\n",SDL_GetTicks());
 
-	// Initialize netplay and GBA Link
-	Netplay_init();
-	GBALink_init();
-
 	while (!quit) {
 		GFX_startFrame();
 
-		// Netplay: handle state sync when connection is established
-		if (Netplay_needsStateSync()) {
-			size_t state_size = core.serialize_size();
-			bool sync_success = false;
-
-			LOG_info("Netplay: State sync starting (mode=%d, state_size=%zu)\n",
-				Netplay_getMode(), state_size);
-
-			if (state_size > 0) {
-				void* state_data = malloc(state_size);
-				if (state_data) {
-					if (Netplay_getMode() == NETPLAY_HOST) {
-						// Host sends current state to client
-						if (core.serialize(state_data, state_size)) {
-							LOG_info("Netplay: Sending state (%zu bytes) to client\n", state_size);
-							if (Netplay_sendState(state_data, state_size) == 0) {
-								sync_success = true;
-								LOG_info("Netplay: State sync complete (host)\n");
-							} else {
-								LOG_info("Netplay: Failed to send state to client\n");
-							}
-						} else {
-							LOG_info("Netplay: Failed to serialize state\n");
-						}
-					} else {
-						// Client receives state from host
-						LOG_info("Netplay: Waiting for state (%zu bytes) from host\n", state_size);
-						if (Netplay_receiveState(state_data, state_size) == 0) {
-							if (core.unserialize(state_data, state_size)) {
-								sync_success = true;
-								LOG_info("Netplay: State loaded successfully (client)\n");
-							} else {
-								LOG_info("Netplay: Failed to unserialize state\n");
-							}
-						} else {
-							LOG_info("Netplay: Failed to receive state from host\n");
-						}
-					}
-					free(state_data);
-				} else {
-					LOG_info("Netplay: Failed to allocate state buffer\n");
-				}
-			} else {
-				LOG_info("Netplay: Core doesn't support state serialization (size=0)\n");
-			}
-
-			if (sync_success) {
-				Netplay_completeStateSync();
-				LOG_info("Netplay: Now in PLAYING state, frame sync starting\n");
-			} else {
-				LOG_info("Netplay: State sync failed, disconnecting\n");
-				Netplay_disconnect();
-			}
-			continue; // Skip this frame, start fresh next iteration
+		// Netplay: handle state sync and frame synchronization
+		if (!Netplay_update((uint16_t)buttons, core.serialize_size, core.serialize, core.unserialize)) {
+			continue;  // Skip frame (syncing or stalled)
 		}
 
-		// Netplay: frame synchronization (when playing or recovering from stall)
-		if (Netplay_isActive() || Netplay_shouldStall()) {
-			Netplay_setLocalInput((uint16_t)buttons);
-
-			// Netplay_preFrame returns false if we need to stall (waiting for remote input)
-			if (!Netplay_preFrame()) {
-				// Check if we got disconnected
-				if (Netplay_getState() == NETPLAY_STATE_DISCONNECTED) {
-					LOG_info("Netplay: Disconnected, resuming single-player\n");
-					Netplay_disconnect();  // Clean up netplay state
-					// Continue to run the game normally
-				} else {
-					// Stalled - don't run this frame, try again next iteration
-					continue;
-				}
-			}
-		}
-
-		// GBA Link: Process any pending connection notifications (must be on main thread)
-		// This handles the case where the listen thread accepted a connection
+		// GBA Link: Process connection notifications and poll/deliver packets
 		GBALink_update();
-
-		// GBA Link: Poll for TCP packets BEFORE core.run() to break the deadlock
-		// The core only polls when in WAITEVENT state, but needs to receive packets
-		// to transition to that state. We poll proactively every frame.
-		// GBALink_pollReceive() handles connection state internally, so we just
-		// check if netpacket session is active (avoids redundant GBALink_isConnected call)
-		if (gbalink_netpacket_active) {
-			gbalink_netpacket_poll_receive();
-		}
+		GBALink_pollAndDeliverPackets();
 
 		core.run();
 
@@ -9388,10 +7469,7 @@ int main(int argc , char* argv[]) {
 	
 finish:
 
-	// GBALink must be cleaned up BEFORE core unload because
-	// GBALink_notifyDisconnected() calls core.netpacket_callbacks
-	GBALink_quit();
-
+	Link_quitAll();
 	Game_close();
 	Core_unload();
 	Core_quit();
@@ -9399,7 +7477,6 @@ finish:
 	Config_quit();
 	Special_quit();
 	MSG_quit();
-	Netplay_quit();
 	PWR_quit();
 	VIB_quit();
 	SND_removeDeviceWatcher();

@@ -44,56 +44,77 @@ typedef enum {
     GBALINK_STATE_ERROR
 } GBALinkState;
 
+// Return codes for GBALink_connectToHost
+#define GBALINK_CONNECT_OK           0   // Connected successfully
+#define GBALINK_CONNECT_ERROR       -1   // Connection failed
+#define GBALINK_CONNECT_NEEDS_RELOAD 1   // Connected but link mode differs, needs game reload
+
 typedef struct {
     char game_name[GBALINK_MAX_GAME_NAME];
     char host_ip[16];
     uint16_t port;
     uint32_t game_crc;
+    char link_mode[32];  // Host's link mode for compatibility check (e.g., "mul_poke", "rfu")
 } GBALinkHostInfo;
 
 // Initialize/cleanup
 void GBALink_init(void);
 void GBALink_quit(void);
 
+// Check if a core version supports GBA Link (RFU/Wireless Adapter)
+// Returns true if supported (gpSP), also sets internal support flag
+bool GBALink_checkCoreSupport(const char* core_version);
+
+// Link mode synchronization - host captures mode, client receives and applies it
+// Called before hosting to capture the current gpsp_serial value
+void GBALink_setLinkMode(const char* mode);
+const char* GBALink_getLinkMode(void);
+
+// Pending link mode after GBALINK_CONNECT_NEEDS_RELOAD
+// Client's current mode and host's mode that differs
+const char* GBALink_getPendingLinkMode(void);    // Returns host's mode (what to change to)
+const char* GBALink_getClientLinkMode(void);     // Returns client's current mode
+void GBALink_clearPendingReload(void);           // Clear pending reload state
+void GBALink_applyPendingLinkMode(void);         // Apply pending mode to config
+
 // Connection management
-int GBALink_startHost(const char* game_name, uint32_t game_crc);
-int GBALink_startHostWithHotspot(const char* game_name, uint32_t game_crc);
+// If hotspot_ip is NULL, uses WiFi mode. Otherwise, uses hotspot mode with given IP.
+// link_mode is the gpsp_serial value to sync with client (can be NULL)
+int GBALink_startHost(const char* game_name, uint32_t game_crc, const char* hotspot_ip, const char* link_mode);
 int GBALink_stopHost(void);
+int GBALink_stopHostFast(void);
 int GBALink_connectToHost(const char* ip, uint16_t port);
 void GBALink_disconnect(void);
 
 // Hotspot mode
 bool GBALink_isUsingHotspot(void);
-void GBALink_setConnectionMethod(GBALinkConnMethod method);
-GBALinkConnMethod GBALink_getConnectionMethod(void);
 
 // Status queries
 GBALinkMode GBALink_getMode(void);
 GBALinkState GBALink_getState(void);
 bool GBALink_isConnected(void);
 const char* GBALink_getStatusMessage(void);
+void GBALink_getStatusMessageSafe(char* buf, size_t buf_size);
 const char* GBALink_getLocalIP(void);
 bool GBALink_hasNetworkConnection(void);
-
-// IP management - call after WiFi network changes
-void GBALink_refreshLocalIP(void);
-void GBALink_clearLocalIP(void);
 
 // Host discovery (for client)
 int GBALink_startDiscovery(void);
 void GBALink_stopDiscovery(void);
 int GBALink_getDiscoveredHosts(GBALinkHostInfo* hosts, int max_hosts);
 
+// Direct link mode query (for hotspot mode where broadcasts may not work)
+// Sends UDP query directly to host_ip and waits for response
+// Returns 0 on success, -1 on failure/timeout
+int GBALink_queryHostLinkMode(const char* host_ip, char* link_mode_out, size_t size);
+
 // Netpacket interface callbacks for core
 // These are called when the core registers its netpacket interface
 void GBALink_onNetpacketStart(uint16_t client_id,
                                retro_netpacket_send_t send_fn,
                                retro_netpacket_poll_receive_t poll_receive_fn);
-void GBALink_onNetpacketReceive(const void* buf, size_t len, uint16_t client_id);
 void GBALink_onNetpacketStop(void);
 void GBALink_onNetpacketPoll(void);
-bool GBALink_onNetpacketConnected(uint16_t client_id);
-void GBALink_onNetpacketDisconnected(uint16_t client_id);
 
 // Called by frontend to provide send/poll functions to core
 // These wrap the network transport layer
@@ -103,20 +124,15 @@ void GBALink_pollReceive(void);
 // Update function (call periodically for connection handling)
 void GBALink_update(void);
 
-// Check if core supports GBA Link (has netpacket interface)
-bool GBALink_coreSupportsLink(void);
+// Set core netpacket callbacks (called by minarch when core registers RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE)
+void GBALink_setCoreCallbacks(const struct retro_netpacket_callback* callbacks);
 
-// Called by minarch when core registers netpacket interface
-void GBALink_setCoreSupport(bool supported);
+// Connection state change notifications (called internally by gbalink)
+void GBALink_notifyConnected(int is_host);
+void GBALink_notifyDisconnected(void);
 
-// Get pending received packet for delivery to core
-// Returns true if a packet is available, fills buf/len/client_id
-bool GBALink_getPendingPacket(void** buf, size_t* len, uint16_t* client_id);
-void GBALink_consumePendingPacket(void);
-
-// Callbacks from gbalink to minarch (defined in minarch.c)
-// Called when GBA Link connection state changes
-extern void GBALink_notifyConnected(int is_host);
-extern void GBALink_notifyDisconnected(void);
+// Netpacket bridging
+bool GBALink_isNetpacketActive(void);
+void GBALink_pollAndDeliverPackets(void);  // Call each frame before core.run()
 
 #endif /* GBALINK_H */
