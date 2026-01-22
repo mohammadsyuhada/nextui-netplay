@@ -757,7 +757,7 @@ bool PLAT_isHotspotActive(void);
 const char* PLAT_getHotspotIP(void);
 // Get hotspot SSID (the full SSID including game name)
 const char* PLAT_getHotspotSSID(void);
-// Get hotspot SSID prefix (e.g., "GBALink-")
+// Get hotspot SSID prefix (unified: "NextUI-" for all link types)
 const char* PLAT_getHotspotSSIDPrefix(void);
 // Get hotspot password
 const char* PLAT_getHotspotPassword(void);

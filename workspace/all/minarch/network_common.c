@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -51,6 +52,12 @@ void NET_getLocalIP(char* ip_out, size_t ip_size) {
     }
 
     freeifaddrs(ifaddr);
+}
+
+bool NET_hasConnection(void) {
+    char ip[16];
+    NET_getLocalIP(ip, sizeof(ip));
+    return strcmp(ip, "0.0.0.0") != 0;
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -137,6 +144,30 @@ int NET_createBroadcastSocket(void) {
     return fd;
 }
 
+int NET_createDiscoveryListenSocket(uint16_t port) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
+
+    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    // Set non-blocking
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    return fd;
+}
+
 //////////////////////////////////////////////////////////////////////////////
 // Hotspot Utilities
 //////////////////////////////////////////////////////////////////////////////
@@ -183,4 +214,79 @@ bool NET_shouldBroadcast(NET_BroadcastTimer* timer) {
     }
 
     return false;
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// Discovery Utilities
+//////////////////////////////////////////////////////////////////////////////
+
+void NET_sendDiscoveryBroadcast(int udp_fd, uint32_t magic, uint32_t protocol_version,
+                                 uint32_t game_crc, uint16_t tcp_port,
+                                 uint16_t discovery_port, const char* game_name,
+                                 const char* link_mode) {
+    if (udp_fd < 0) return;
+
+    NET_DiscoveryPacket pkt = {0};
+    pkt.magic = htonl(magic);
+    pkt.protocol_version = htonl(protocol_version);
+    pkt.game_crc = htonl(game_crc);
+    pkt.port = htons(tcp_port);
+    if (game_name) {
+        strncpy(pkt.game_name, game_name, NET_MAX_GAME_NAME - 1);
+    }
+    if (link_mode) {
+        strncpy(pkt.link_mode, link_mode, NET_MAX_LINK_MODE - 1);
+    }
+
+    struct sockaddr_in bcast = {0};
+    bcast.sin_family = AF_INET;
+    bcast.sin_addr.s_addr = INADDR_BROADCAST;
+    bcast.sin_port = htons(discovery_port);
+
+    sendto(udp_fd, &pkt, sizeof(pkt), 0,
+           (struct sockaddr*)&bcast, sizeof(bcast));
+}
+
+int NET_receiveDiscoveryResponses(int udp_fd, uint32_t expected_magic,
+                                   NET_HostInfo* hosts, int* current_count,
+                                   int max_hosts) {
+    if (udp_fd < 0 || !hosts || !current_count) return 0;
+
+    NET_DiscoveryPacket pkt;
+    struct sockaddr_in sender;
+    socklen_t sender_len = sizeof(sender);
+
+    while (recvfrom(udp_fd, &pkt, sizeof(pkt), MSG_DONTWAIT,
+                    (struct sockaddr*)&sender, &sender_len) == sizeof(pkt)) {
+        if (ntohl(pkt.magic) != expected_magic) continue;
+
+        char ip[16];
+        inet_ntop(AF_INET, &sender.sin_addr, ip, sizeof(ip));
+
+        // Check for duplicates
+        bool found = false;
+        for (int i = 0; i < *current_count; i++) {
+            if (strcmp(hosts[i].host_ip, ip) == 0) {
+                found = true;
+                break;
+            }
+        }
+
+        if (!found && *current_count < max_hosts) {
+            NET_HostInfo* h = &hosts[*current_count];
+            strncpy(h->game_name, pkt.game_name, NET_MAX_GAME_NAME - 1);
+            h->game_name[NET_MAX_GAME_NAME - 1] = '\0';
+            strncpy(h->host_ip, ip, sizeof(h->host_ip) - 1);
+            h->host_ip[sizeof(h->host_ip) - 1] = '\0';
+            h->port = ntohs(pkt.port);
+            h->game_crc = ntohl(pkt.game_crc);
+            strncpy(h->link_mode, pkt.link_mode, NET_MAX_LINK_MODE - 1);
+            h->link_mode[NET_MAX_LINK_MODE - 1] = '\0';
+            (*current_count)++;
+        }
+
+        sender_len = sizeof(sender); // Reset for next iteration
+    }
+
+    return *current_count;
 }

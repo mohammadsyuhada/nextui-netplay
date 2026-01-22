@@ -9,10 +9,16 @@
  * - Both devices run identical emulation with identical inputs
  */
 
+#define _GNU_SOURCE  // For strcasestr
+
 #include "netplay.h"
+#include "netplay_helper.h"  // For stopHotspotAndRestoreWiFiAsync, netplay_connected_to_hotspot
 #include "network_common.h"
 #include "defines.h"  // Must come before api.h for BTN_ID_COUNT
 #include "api.h"
+#ifdef HAS_WIFIMG
+#include "wifi_direct.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,6 +56,7 @@ enum {
     CMD_READY      = 0x09,  // Ready to play
     CMD_PAUSE      = 0x0A,  // Player paused (menu opened)
     CMD_RESUME     = 0x0B,  // Player resumed (menu closed)
+    CMD_KEEPALIVE  = 0x0C,  // Keepalive during stall to prevent timeout
 };
 
 // Frame input entry
@@ -72,15 +79,6 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint16_t input;
 } InputPacket;
-
-// Discovery packet
-typedef struct __attribute__((packed)) {
-    uint32_t magic;
-    uint32_t protocol_version;
-    uint32_t game_crc;
-    uint16_t port;
-    char game_name[NETPLAY_MAX_GAME_NAME];
-} DiscoveryPacket;
 
 // Main netplay state
 static struct {
@@ -140,6 +138,9 @@ static struct {
     bool local_paused;   // We have paused (menu open)
     bool remote_paused;  // Remote player has paused
 
+    // Initialization flag
+    bool initialized;
+
 } np = {0};
 
 // Forward declarations
@@ -154,6 +155,8 @@ static void init_frame_buffer(void);
 //////////////////////////////////////////////////////////////////////////////
 
 void Netplay_init(void) {
+    if (np.initialized) return;
+
     memset(&np, 0, sizeof(np));
     np.mode = NETPLAY_OFF;
     np.state = NETPLAY_STATE_IDLE;
@@ -164,13 +167,42 @@ void Netplay_init(void) {
     pthread_mutex_init(&np.mutex, NULL);
     NET_getLocalIP(np.local_ip, sizeof(np.local_ip));
     snprintf(np.status_msg, sizeof(np.status_msg), "Netplay ready");
+    np.initialized = true;
 }
 
 void Netplay_quit(void) {
+    if (!np.initialized) return;
+
+    // Capture hotspot state before cleanup
+    bool was_host = (np.mode == NETPLAY_HOST);
+    bool needs_hotspot_cleanup = np.using_hotspot || netplay_connected_to_hotspot;
+
     Netplay_disconnect();
-    Netplay_stopHost();
+    Netplay_stopHostFast();  // Use fast version to skip blocking PLAT_stopHotspot
     Netplay_stopDiscovery();
+
+    // Handle hotspot cleanup asynchronously
+    if (needs_hotspot_cleanup) {
+        stopHotspotAndRestoreWiFiAsync(was_host);
+        netplay_connected_to_hotspot = 0;
+    }
+
     pthread_mutex_destroy(&np.mutex);
+    np.initialized = false;
+}
+
+bool Netplay_checkCoreSupport(const char* core_name) {
+    // These cores have been tested and work with frame-synchronized netplay
+    // core_name is derived from the .so filename (e.g., "fbneo" from "fbneo_libretro.so")
+    if (strcasecmp(core_name, "fbneo") == 0 ||
+        strcasecmp(core_name, "fceumm") == 0 ||
+        strcasecmp(core_name, "snes9x") == 0 ||
+        strcasecmp(core_name, "mednafen_supafaust") == 0 ||
+        strcasecmp(core_name, "picodrive") == 0 ||
+        strcasecmp(core_name, "pcsx_rearmed") == 0) {
+        return true;
+    }
+    return false;
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -201,19 +233,39 @@ static void init_frame_buffer(void) {
 // Host Mode
 //////////////////////////////////////////////////////////////////////////////
 
-int Netplay_startHost(const char* game_name, uint32_t game_crc) {
+int Netplay_startHost(const char* game_name, uint32_t game_crc, const char* hotspot_ip) {
+    Netplay_init();  // Lazy init
     if (np.mode != NETPLAY_OFF) {
         return -1;
+    }
+
+    // Set up IP based on mode
+    if (hotspot_ip) {
+        np.using_hotspot = true;
+        strncpy(np.local_ip, hotspot_ip, sizeof(np.local_ip) - 1);
+        np.local_ip[sizeof(np.local_ip) - 1] = '\0';
     }
 
     // Create TCP listen socket using shared utility
     np.listen_fd = NET_createListenSocket(np.port, np.status_msg, sizeof(np.status_msg));
     if (np.listen_fd < 0) {
+        if (hotspot_ip) {
+            np.using_hotspot = false;
+        }
         return -1;
     }
 
     // Create UDP socket for discovery broadcasts
     np.udp_fd = NET_createBroadcastSocket();
+    if (np.udp_fd < 0) {
+        close(np.listen_fd);
+        np.listen_fd = -1;
+        if (hotspot_ip) {
+            np.using_hotspot = false;
+        }
+        snprintf(np.status_msg, sizeof(np.status_msg), "Failed to create broadcast socket");
+        return -1;
+    }
 
     strncpy(np.game_name, game_name, NETPLAY_MAX_GAME_NAME - 1);
     np.game_crc = game_crc;
@@ -230,67 +282,39 @@ int Netplay_startHost(const char* game_name, uint32_t game_crc) {
     return 0;
 }
 
-int Netplay_startHostWithHotspot(const char* game_name, uint32_t game_crc) {
-    if (np.mode != NETPLAY_OFF) {
-        return -1;
+void Netplay_stopBroadcast(void) {
+    // Close UDP socket - no longer needed after connection
+    if (np.udp_fd >= 0) {
+        close(np.udp_fd);
+        np.udp_fd = -1;
     }
-
-    // Generate SSID with random 4-character code using shared utility
-    char ssid[33];
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    NET_HotspotConfig hotspot_cfg = {
-        .prefix = NETPLAY_HOTSPOT_SSID_PREFIX,
-        .seed = (unsigned int)(tv.tv_usec ^ tv.tv_sec ^ game_crc)
-    };
-    NET_generateHotspotSSID(ssid, sizeof(ssid), &hotspot_cfg);
-
-    const char* pass = PLAT_getHotspotPassword();
-
-    snprintf(np.status_msg, sizeof(np.status_msg), "Starting hotspot...");
-
-    if (PLAT_startHotspot(ssid, pass) != 0) {
-        snprintf(np.status_msg, sizeof(np.status_msg), "Failed to start hotspot");
-        return -1;
-    }
-
-    np.using_hotspot = true;
-
-    // Use hotspot IP instead of WiFi IP
-    strncpy(np.local_ip, PLAT_getHotspotIP(), sizeof(np.local_ip) - 1);
-
-    // Create TCP listen socket using shared utility
-    np.listen_fd = NET_createListenSocket(np.port, np.status_msg, sizeof(np.status_msg));
-    if (np.listen_fd < 0) {
-        PLAT_stopHotspot();
-        np.using_hotspot = false;
-        return -1;
-    }
-
-    // Create UDP socket for discovery broadcasts
-    np.udp_fd = NET_createBroadcastSocket();
-
-    strncpy(np.game_name, game_name, NETPLAY_MAX_GAME_NAME - 1);
-    np.game_crc = game_crc;
-
-    // Start listen thread
-    np.running = true;
-    pthread_create(&np.listen_thread, NULL, listen_thread_func, NULL);
-
-    np.mode = NETPLAY_HOST;
-    np.state = NETPLAY_STATE_WAITING;
-    np.needs_state_sync = true;
-
-    snprintf(np.status_msg, sizeof(np.status_msg), "Hotspot: %s | IP: %s", ssid, np.local_ip);
-    return 0;
 }
 
-int Netplay_stopHost(void) {
+// Restart UDP broadcast when going back to waiting state
+// Called when client disconnects but host wants to accept new clients
+static void Netplay_restartBroadcast(void) {
+    if (np.udp_fd >= 0) return;  // Already running
+    if (np.mode != NETPLAY_HOST) return;  // Only for host
+
+    np.udp_fd = NET_createBroadcastSocket();
+    if (np.udp_fd < 0) {
+        snprintf(np.status_msg, sizeof(np.status_msg), "Failed to restart broadcast");
+    }
+}
+
+// Internal helper - stops host with optional hotspot cleanup
+static int Netplay_stopHostInternal(bool skip_hotspot_cleanup) {
     if (np.mode != NETPLAY_HOST) return -1;
 
     np.running = false;
+
+    // Wake up listen thread by closing listen socket (causes select to return)
+    // This is safer than pthread_cancel which may leave resources inconsistent
+    if (np.listen_fd >= 0) {
+        shutdown(np.listen_fd, SHUT_RDWR);
+    }
+
     if (np.listen_thread) {
-        pthread_cancel(np.listen_thread);
         pthread_join(np.listen_thread, NULL);
         np.listen_thread = 0;
     }
@@ -299,16 +323,19 @@ int Netplay_stopHost(void) {
         close(np.listen_fd);
         np.listen_fd = -1;
     }
-    if (np.udp_fd >= 0) {
-        close(np.udp_fd);
-        np.udp_fd = -1;
-    }
 
+    Netplay_stopBroadcast();
     Netplay_disconnect();
 
     // Stop hotspot if it was started
     if (np.using_hotspot) {
-        PLAT_stopHotspot();
+        if (!skip_hotspot_cleanup) {
+#ifdef HAS_WIFIMG
+            WIFI_direct_stopHotspot();
+#else
+            PLAT_stopHotspot();
+#endif
+        }
         np.using_hotspot = false;
     }
 
@@ -316,6 +343,14 @@ int Netplay_stopHost(void) {
     np.state = NETPLAY_STATE_IDLE;
     snprintf(np.status_msg, sizeof(np.status_msg), "Netplay ready");
     return 0;
+}
+
+int Netplay_stopHost(void) {
+    return Netplay_stopHostInternal(false);
+}
+
+int Netplay_stopHostFast(void) {
+    return Netplay_stopHostInternal(true);
 }
 
 static void* listen_thread_func(void* arg) {
@@ -326,28 +361,23 @@ static void* listen_thread_func(void* arg) {
     NET_initBroadcastTimer(&broadcast_timer, DISCOVERY_BROADCAST_INTERVAL_US);
 
     while (np.running && np.listen_fd >= 0) {
+        // Check state under mutex protection to avoid race conditions
+        pthread_mutex_lock(&np.mutex);
+        bool is_waiting = (np.state == NETPLAY_STATE_WAITING);
+        int udp_fd = np.udp_fd;
+        pthread_mutex_unlock(&np.mutex);
+
         // Rate-limited discovery broadcast using shared timer
-        if (np.udp_fd >= 0 && np.state == NETPLAY_STATE_WAITING) {
+        if (udp_fd >= 0 && is_waiting) {
             if (NET_shouldBroadcast(&broadcast_timer)) {
-                DiscoveryPacket disc = {0};
-                disc.magic = htonl(NP_DISCOVERY_RESP);
-                disc.protocol_version = htonl(NETPLAY_PROTOCOL_VERSION);
-                disc.game_crc = htonl(np.game_crc);
-                disc.port = htons(np.port);
-                strncpy(disc.game_name, np.game_name, NETPLAY_MAX_GAME_NAME - 1);
-
-                struct sockaddr_in bcast = {0};
-                bcast.sin_family = AF_INET;
-                bcast.sin_addr.s_addr = INADDR_BROADCAST;
-                bcast.sin_port = htons(NETPLAY_DISCOVERY_PORT);
-
-                sendto(np.udp_fd, &disc, sizeof(disc), 0,
-                       (struct sockaddr*)&bcast, sizeof(bcast));
+                NET_sendDiscoveryBroadcast(udp_fd, NP_DISCOVERY_RESP, NETPLAY_PROTOCOL_VERSION,
+                                           np.game_crc, np.port, NETPLAY_DISCOVERY_PORT,
+                                           np.game_name, NULL);  // Netplay doesn't use link_mode
             }
         }
 
         // Check for incoming connection (only accept when waiting)
-        if (np.state == NETPLAY_STATE_WAITING) {
+        if (is_waiting) {
             fd_set fds;
             FD_ZERO(&fds);
             FD_SET(np.listen_fd, &fds);
@@ -400,6 +430,7 @@ static void* listen_thread_func(void* arg) {
 //////////////////////////////////////////////////////////////////////////////
 
 int Netplay_connectToHost(const char* ip, uint16_t port) {
+    Netplay_init();  // Lazy init
     if (np.mode != NETPLAY_OFF) {
         return -1;
     }
@@ -492,26 +523,11 @@ void Netplay_disconnect(void) {
 int Netplay_startDiscovery(void) {
     if (np.discovery_active) return 0;
 
-    np.udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (np.udp_fd < 0) return -1;
-
-    int opt = 1;
-    setsockopt(np.udp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    struct sockaddr_in addr = {0};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(NETPLAY_DISCOVERY_PORT);
-
-    if (bind(np.udp_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(np.udp_fd);
-        np.udp_fd = -1;
+    np.udp_fd = NET_createDiscoveryListenSocket(NETPLAY_DISCOVERY_PORT);
+    if (np.udp_fd < 0) {
+        snprintf(np.status_msg, sizeof(np.status_msg), "Failed to start discovery");
         return -1;
     }
-
-    // Set non-blocking
-    int flags = fcntl(np.udp_fd, F_GETFL, 0);
-    fcntl(np.udp_fd, F_SETFL, flags | O_NONBLOCK);
 
     np.num_hosts = 0;
     np.discovery_active = true;
@@ -532,36 +548,11 @@ void Netplay_stopDiscovery(void) {
 int Netplay_getDiscoveredHosts(NetplayHostInfo* hosts, int max_hosts) {
     if (!np.discovery_active || np.udp_fd < 0) return 0;
 
-    // Poll for discovery responses
-    DiscoveryPacket pkt;
-    struct sockaddr_in sender;
-    socklen_t len = sizeof(sender);
-
-    while (recvfrom(np.udp_fd, &pkt, sizeof(pkt), 0,
-                    (struct sockaddr*)&sender, &len) == sizeof(pkt)) {
-        if (ntohl(pkt.magic) != NP_DISCOVERY_RESP) continue;
-
-        char ip[16];
-        inet_ntop(AF_INET, &sender.sin_addr, ip, sizeof(ip));
-
-        // Check if already in list
-        bool found = false;
-        for (int i = 0; i < np.num_hosts; i++) {
-            if (strcmp(np.discovered_hosts[i].host_ip, ip) == 0) {
-                found = true;
-                break;
-            }
-        }
-
-        if (!found && np.num_hosts < NETPLAY_MAX_HOSTS) {
-            NetplayHostInfo* h = &np.discovered_hosts[np.num_hosts];
-            strncpy(h->game_name, pkt.game_name, NETPLAY_MAX_GAME_NAME - 1);
-            strncpy(h->host_ip, ip, sizeof(h->host_ip) - 1);
-            h->port = ntohs(pkt.port);
-            h->game_crc = ntohl(pkt.game_crc);
-            np.num_hosts++;
-        }
-    }
+    // Poll for discovery responses using shared function
+    // NetplayHostInfo and NET_HostInfo have identical layouts
+    NET_receiveDiscoveryResponses(np.udp_fd, NP_DISCOVERY_RESP,
+                                   (NET_HostInfo*)np.discovered_hosts, &np.num_hosts,
+                                   NETPLAY_MAX_HOSTS);
 
     int count = (np.num_hosts < max_hosts) ? np.num_hosts : max_hosts;
     memcpy(hosts, np.discovered_hosts, count * sizeof(NetplayHostInfo));
@@ -573,9 +564,17 @@ int Netplay_getDiscoveredHosts(NetplayHostInfo* hosts, int max_hosts) {
 //////////////////////////////////////////////////////////////////////////////
 
 bool Netplay_preFrame(void) {
-    if (!Netplay_isConnected()) return true;
-
     pthread_mutex_lock(&np.mutex);
+
+    // Check connection under mutex to avoid TOCTOU race
+    if (np.tcp_fd < 0 ||
+        (np.state != NETPLAY_STATE_SYNCING &&
+         np.state != NETPLAY_STATE_PLAYING &&
+         np.state != NETPLAY_STATE_STALLED &&
+         np.state != NETPLAY_STATE_PAUSED)) {
+        pthread_mutex_unlock(&np.mutex);
+        return true;
+    }
 
     // Get slot for execution (current run frame)
     FrameInput* run_slot = get_frame_slot(np.run_frame);
@@ -648,8 +647,22 @@ bool Netplay_preFrame(void) {
                     remote_slot->have_p1 = true;
                 }
             } else if (hdr.cmd == CMD_DISCONNECT) {
-                np.state = NETPLAY_STATE_DISCONNECTED;
+                // Close TCP connection
+                close(np.tcp_fd);
+                np.tcp_fd = -1;
                 np.audio_should_silence = false;
+
+                // For host, go back to waiting and restart broadcast
+                if (np.mode == NETPLAY_HOST) {
+                    np.state = NETPLAY_STATE_WAITING;
+                    np.needs_state_sync = true;
+                    np.stall_frames = 0;
+                    Netplay_restartBroadcast();
+                    snprintf(np.status_msg, sizeof(np.status_msg), "Client left, waiting on %s:%d", np.local_ip, np.port);
+                } else {
+                    np.state = NETPLAY_STATE_DISCONNECTED;
+                    snprintf(np.status_msg, sizeof(np.status_msg), "Host disconnected");
+                }
                 pthread_mutex_unlock(&np.mutex);
                 return false;
             } else if (hdr.cmd == CMD_PAUSE) {
@@ -662,6 +675,9 @@ bool Netplay_preFrame(void) {
                     np.state = NETPLAY_STATE_PLAYING;
                     snprintf(np.status_msg, sizeof(np.status_msg), "Netplay active");
                 }
+            } else if (hdr.cmd == CMD_KEEPALIVE) {
+                // Keepalive received - connection is alive, reset stall counter
+                // This prevents timeout during legitimate delays (save operations, etc.)
             }
         }
         attempts++;
@@ -671,13 +687,25 @@ bool Netplay_preFrame(void) {
     run_slot = get_frame_slot(np.run_frame);
     if (!run_slot->have_p1 || !run_slot->have_p2) {
         np.stall_frames++;
+
+        // Send keepalive during stall to prevent remote from timing out
+        if (np.stall_frames % NETPLAY_KEEPALIVE_INTERVAL_FRAMES == 0) {
+            send_packet(CMD_KEEPALIVE, np.self_frame, NULL, 0);
+        }
+
         // Skip timeout when either player is paused (menu open)
-        if (np.stall_frames > 30 && !np.local_paused && !np.remote_paused) {
-            snprintf(np.status_msg, sizeof(np.status_msg), "Connection timeout");
-            np.state = NETPLAY_STATE_DISCONNECTED;
-            np.audio_should_silence = false;
-            pthread_mutex_unlock(&np.mutex);
-            return false;
+        if (!np.local_paused && !np.remote_paused) {
+            if (np.stall_frames > NETPLAY_STALL_TIMEOUT_FRAMES) {
+                snprintf(np.status_msg, sizeof(np.status_msg), "Connection timeout");
+                np.state = NETPLAY_STATE_DISCONNECTED;
+                np.audio_should_silence = false;
+                pthread_mutex_unlock(&np.mutex);
+                return false;
+            } else if (np.stall_frames > NETPLAY_STALL_WARNING_FRAMES) {
+                // Show countdown warning to user
+                int remaining = (NETPLAY_STALL_TIMEOUT_FRAMES - np.stall_frames) / 60;
+                snprintf(np.status_msg, sizeof(np.status_msg), "Waiting... (%ds)", remaining);
+            }
         }
         np.state = NETPLAY_STATE_STALLED;
         np.audio_should_silence = true;
@@ -701,6 +729,17 @@ uint16_t Netplay_getInputState(unsigned port) {
     pthread_mutex_unlock(&np.mutex);
 
     return input;
+}
+
+uint32_t Netplay_getPlayerButtons(unsigned port, uint32_t local_buttons) {
+    // When netplay active, inputs come from the synchronized frame buffer
+    // Host = Player 1, Client = Player 2 (always)
+    // Both devices see identical inputs for same frame
+    if (np.mode != NETPLAY_OFF && Netplay_isConnected()) {
+        return Netplay_getInputState(port);
+    }
+    // Local play - only P1 has input
+    return (port == 0) ? local_buttons : 0;
 }
 
 void Netplay_setLocalInput(uint16_t input) {
@@ -869,28 +908,9 @@ bool Netplay_isActive(void) {
 const char* Netplay_getStatusMessage(void) { return np.status_msg; }
 const char* Netplay_getLocalIP(void) { return np.local_ip; }
 
-void Netplay_clearLocalIP(void) {
-    strcpy(np.local_ip, "N/A");
-}
-
-uint32_t Netplay_getFrameCount(void) { return np.run_frame; }
-
 bool Netplay_hasNetworkConnection(void) {
-    // Re-check local IP in case network state changed
     NET_getLocalIP(np.local_ip, sizeof(np.local_ip));
-    // If IP is 0.0.0.0, no network connection
-    return strcmp(np.local_ip, "0.0.0.0") != 0;
-}
-
-void Netplay_update(void) {
-    // Check for connection errors
-    if (np.tcp_fd >= 0) {
-        int error = 0;
-        socklen_t len = sizeof(error);
-        if (getsockopt(np.tcp_fd, SOL_SOCKET, SO_ERROR, &error, &len) < 0 || error != 0) {
-            Netplay_disconnect();
-        }
-    }
+    return NET_hasConnection();
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -944,6 +964,72 @@ void Netplay_pollWhilePaused(void) {
     }
 }
 
+//////////////////////////////////////////////////////////////////////////////
+// Main Loop Update
+//////////////////////////////////////////////////////////////////////////////
+
+int Netplay_update(uint16_t local_input,
+                   Netplay_SerializeSizeFn serialize_size_fn,
+                   Netplay_SerializeFn serialize_fn,
+                   Netplay_UnserializeFn unserialize_fn) {
+    // Handle state sync when connection is established
+    if (Netplay_needsStateSync()) {
+        if (!serialize_size_fn || !serialize_fn || !unserialize_fn) {
+            Netplay_disconnect();
+            return 1;  // Run frame normally after disconnect
+        }
+
+        size_t state_size = serialize_size_fn();
+        bool sync_success = false;
+
+        if (state_size > 0) {
+            void* state_data = malloc(state_size);
+            if (state_data) {
+                if (np.mode == NETPLAY_HOST) {
+                    // Host sends current state to client
+                    if (serialize_fn(state_data, state_size)) {
+                        if (Netplay_sendState(state_data, state_size) == 0) {
+                            sync_success = true;
+                        }
+                    }
+                } else {
+                    // Client receives state from host
+                    if (Netplay_receiveState(state_data, state_size) == 0) {
+                        if (unserialize_fn(state_data, state_size)) {
+                            sync_success = true;
+                        }
+                    }
+                }
+                free(state_data);
+            }
+        }
+
+        if (sync_success) {
+            Netplay_completeStateSync();
+        } else {
+            Netplay_disconnect();
+        }
+        return 0;  // Skip this frame
+    }
+
+    // Frame synchronization (when playing or recovering from stall)
+    if (Netplay_isActive() || Netplay_shouldStall()) {
+        Netplay_setLocalInput(local_input);
+
+        if (!Netplay_preFrame()) {
+            // Check if we got disconnected
+            if (np.state == NETPLAY_STATE_DISCONNECTED) {
+                Netplay_disconnect();  // Clean up netplay state
+                return 1;  // Continue to run the game normally
+            }
+            // Stalled - don't run this frame
+            return 0;
+        }
+    }
+
+    return 1;  // Run frame
+}
+
 bool Netplay_isPaused(void) {
     return np.local_paused || np.remote_paused;
 }
@@ -974,6 +1060,31 @@ static bool send_packet(uint8_t cmd, uint32_t frame, const void* data, uint16_t 
     return true;
 }
 
+// Helper to handle disconnect within recv_packet (called with mutex NOT held)
+static void handle_recv_disconnect(void) {
+    pthread_mutex_lock(&np.mutex);
+
+    // Close socket under mutex protection
+    if (np.tcp_fd >= 0) {
+        close(np.tcp_fd);
+        np.tcp_fd = -1;
+    }
+
+    // For host, go back to waiting and restart broadcast
+    if (np.mode == NETPLAY_HOST) {
+        np.state = NETPLAY_STATE_WAITING;
+        np.needs_state_sync = true;
+        np.stall_frames = 0;
+        snprintf(np.status_msg, sizeof(np.status_msg), "Client left, waiting on %s:%d", np.local_ip, np.port);
+        pthread_mutex_unlock(&np.mutex);
+        Netplay_restartBroadcast();  // Can be called without mutex
+    } else {
+        np.state = NETPLAY_STATE_DISCONNECTED;
+        snprintf(np.status_msg, sizeof(np.status_msg), "Remote disconnected");
+        pthread_mutex_unlock(&np.mutex);
+    }
+}
+
 static bool recv_packet(PacketHeader* hdr, void* data, uint16_t max_size, int timeout_ms) {
     if (np.tcp_fd < 0) return false;
 
@@ -993,19 +1104,13 @@ static bool recv_packet(PacketHeader* hdr, void* data, uint16_t max_size, int ti
     ssize_t ret = recv(np.tcp_fd, hdr, sizeof(*hdr), 0);
     if (ret == 0) {
         // Connection closed by remote end
-        np.state = NETPLAY_STATE_DISCONNECTED;
-        snprintf(np.status_msg, sizeof(np.status_msg), "Remote disconnected");
-        close(np.tcp_fd);
-        np.tcp_fd = -1;
+        handle_recv_disconnect();
         return false;
     }
     if (ret < 0 || ret != sizeof(*hdr)) {
         // Error or partial read
         if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN) {
-            np.state = NETPLAY_STATE_DISCONNECTED;
-            snprintf(np.status_msg, sizeof(np.status_msg), "Connection lost");
-            close(np.tcp_fd);
-            np.tcp_fd = -1;
+            handle_recv_disconnect();
         }
         return false;
     }
@@ -1013,12 +1118,15 @@ static bool recv_packet(PacketHeader* hdr, void* data, uint16_t max_size, int ti
     hdr->frame = ntohl(hdr->frame);
     hdr->size = ntohs(hdr->size);
 
+    // Validate packet size to prevent malformed packet issues
+    if (hdr->size > 4096) {
+        return false;  // Reject suspiciously large packets
+    }
+
     if (hdr->size > 0 && data && hdr->size <= max_size) {
         ret = recv(np.tcp_fd, data, hdr->size, 0);
         if (ret == 0) {
-            np.state = NETPLAY_STATE_DISCONNECTED;
-            close(np.tcp_fd);
-            np.tcp_fd = -1;
+            handle_recv_disconnect();
             return false;
         }
         if (ret != hdr->size) {
