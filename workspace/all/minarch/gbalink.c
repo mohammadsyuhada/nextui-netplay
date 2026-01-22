@@ -305,9 +305,10 @@ void GBALink_quit(void) {
     gl.initialized = false;
 }
 
-bool GBALink_checkCoreSupport(const char* core_version) {
+bool GBALink_checkCoreSupport(const char* core_name) {
     // Only gpSP supports Wireless Adapter/RFU via netpacket interface
-    bool supported = strcasestr(core_version, "gpSP") != NULL;
+    // core_name is derived from the .so filename (e.g., "gpsp" from "gpsp_libretro.so")
+    bool supported = strcasecmp(core_name, "gpsp") == 0;
     gl.has_netpacket_support = supported;
     return supported;
 }

@@ -5065,14 +5065,14 @@ void Core_load(void) {
 	LOG_info("game path: %s (%i)\n", game_info.path, game.size);
 	core.load_game(&game_info);
 
-	if (Netplay_checkCoreSupport((char*)core.version)) {
+	if (Netplay_checkCoreSupport((char*)core.name)) {
 		core.show_netplay = true;
 	}
-	if (GBALink_checkCoreSupport((char*)core.version)) {
+	if (GBALink_checkCoreSupport((char*)core.name)) {
 		core.has_netpacket = true;
 		core.show_netplay = true;
 	}
-	if (GBLink_checkCoreSupport((char*)core.version)) {
+	if (GBLink_checkCoreSupport((char*)core.name)) {
 		core.has_gblink = true;
 		core.show_netplay = true;
 	}

@@ -69,9 +69,10 @@ typedef struct {
 void Netplay_init(void);
 void Netplay_quit(void);
 
-// Check if a core version supports netplay (frame-sync)
-// Returns true if supported, also sets internal support flag
-bool Netplay_checkCoreSupport(const char* core_version);
+// Check if a core supports netplay (frame-sync)
+// core_name is derived from the .so filename (e.g., "fbneo" from "fbneo_libretro.so")
+// Returns true if supported
+bool Netplay_checkCoreSupport(const char* core_name);
 
 // Connection management
 // If hotspot_ip is NULL, uses WiFi mode. Otherwise, uses hotspot mode with given IP.

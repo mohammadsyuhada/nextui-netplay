@@ -191,14 +191,15 @@ void Netplay_quit(void) {
     np.initialized = false;
 }
 
-bool Netplay_checkCoreSupport(const char* core_version) {
+bool Netplay_checkCoreSupport(const char* core_name) {
     // These cores have been tested and work with frame-synchronized netplay
-    if (strcasestr(core_version, "FBNeo") ||
-        strcasestr(core_version, "FCEUmm") ||
-        strcasestr(core_version, "Snes9x") ||
-        strcasestr(core_version, "Supafaust") ||
-        strcasestr(core_version, "PicoDrive") ||
-        strcasestr(core_version, "PCSX")) {
+    // core_name is derived from the .so filename (e.g., "fbneo" from "fbneo_libretro.so")
+    if (strcasecmp(core_name, "fbneo") == 0 ||
+        strcasecmp(core_name, "fceumm") == 0 ||
+        strcasecmp(core_name, "snes9x") == 0 ||
+        strcasecmp(core_name, "mednafen_supafaust") == 0 ||
+        strcasecmp(core_name, "picodrive") == 0 ||
+        strcasecmp(core_name, "pcsx_rearmed") == 0) {
         return true;
     }
     return false;

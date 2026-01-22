@@ -149,9 +149,10 @@ void GBLink_quit(void) {
     pthread_mutex_destroy(&gl.mutex);
 }
 
-bool GBLink_checkCoreSupport(const char* core_version) {
+bool GBLink_checkCoreSupport(const char* core_name) {
     // Gambatte supports GB Link via core options (HAVE_NETWORK=1)
-    bool supported = strcasestr(core_version, "gambatte") != NULL;
+    // core_name is derived from the .so filename (e.g., "gambatte" from "gambatte_libretro.so")
+    bool supported = strcasecmp(core_name, "gambatte") == 0;
     gl.has_gambatte_support = supported;
     return supported;
 }

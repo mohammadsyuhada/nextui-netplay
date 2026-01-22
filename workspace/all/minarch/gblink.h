@@ -54,9 +54,10 @@ typedef struct {
 void GBLink_init(void);
 void GBLink_quit(void);
 
-// Check if a core version supports GB Link (link cable via gambatte)
+// Check if a core supports GB Link (link cable via gambatte)
+// core_name is derived from the .so filename (e.g., "gambatte" from "gambatte_libretro.so")
 // Returns true if supported (gambatte), also sets internal support flag
-bool GBLink_checkCoreSupport(const char* core_version);
+bool GBLink_checkCoreSupport(const char* core_name);
 
 // Host mode (sets gambatte_gb_link_mode = "Network Server")
 // If hotspot_ip is NULL, uses WiFi mode. Otherwise, uses hotspot mode with given IP.

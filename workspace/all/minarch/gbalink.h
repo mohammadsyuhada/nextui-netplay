@@ -61,9 +61,10 @@ typedef struct {
 void GBALink_init(void);
 void GBALink_quit(void);
 
-// Check if a core version supports GBA Link (RFU/Wireless Adapter)
-// Returns true if supported (gpSP), also sets internal support flag
-bool GBALink_checkCoreSupport(const char* core_version);
+// Check if a core supports GBA Link (RFU/Wireless Adapter)
+// core_name is derived from the .so filename (e.g., "gpsp" from "gpsp_libretro.so")
+// Returns true if supported (gpsp), also sets internal support flag
+bool GBALink_checkCoreSupport(const char* core_name);
 
 // Link mode synchronization - host captures mode, client receives and applies it
 // Called before hosting to capture the current gpsp_serial value
