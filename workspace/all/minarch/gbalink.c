@@ -477,8 +477,6 @@ static int GBALink_stopHostInternal(bool skip_hotspot_cleanup) {
         if (!skip_hotspot_cleanup) {
 #ifdef HAS_WIFIMG
             WIFI_direct_stopHotspot();
-#else
-            PLAT_stopHotspot();
 #endif
         }
         gl.using_hotspot = false;
@@ -1148,6 +1146,7 @@ void GBALink_pollReceive(void) {
 //////////////////////////////////////////////////////////////////////////////
 
 GBALinkMode GBALink_getMode(void) {
+    if (!gl.initialized) return GBALINK_OFF;
     pthread_mutex_lock(&gl.mutex);
     GBALinkMode mode = gl.mode;
     pthread_mutex_unlock(&gl.mutex);
@@ -1155,6 +1154,7 @@ GBALinkMode GBALink_getMode(void) {
 }
 
 GBALinkState GBALink_getState(void) {
+    if (!gl.initialized) return GBALINK_STATE_IDLE;
     pthread_mutex_lock(&gl.mutex);
     GBALinkState state = gl.state;
     pthread_mutex_unlock(&gl.mutex);
@@ -1162,6 +1162,7 @@ GBALinkState GBALink_getState(void) {
 }
 
 bool GBALink_isConnected(void) {
+    if (!gl.initialized) return false;
     pthread_mutex_lock(&gl.mutex);
     bool connected = gl.tcp_fd >= 0 && gl.state == GBALINK_STATE_CONNECTED;
     pthread_mutex_unlock(&gl.mutex);
@@ -1171,6 +1172,11 @@ bool GBALink_isConnected(void) {
 const char* GBALink_getStatusMessage(void) { return gl.status_msg; }
 
 void GBALink_getStatusMessageSafe(char* buf, size_t buf_size) {
+    if (!gl.initialized) {
+        strncpy(buf, "Not initialized", buf_size - 1);
+        buf[buf_size - 1] = '\0';
+        return;
+    }
     pthread_mutex_lock(&gl.mutex);
     strncpy(buf, gl.status_msg, buf_size - 1);
     buf[buf_size - 1] = '\0';
@@ -1179,6 +1185,11 @@ void GBALink_getStatusMessageSafe(char* buf, size_t buf_size) {
 
 // Thread-safe version that copies IP to caller's buffer
 void GBALink_getLocalIPSafe(char* buf, size_t buf_size) {
+    if (!gl.initialized) {
+        strncpy(buf, "0.0.0.0", buf_size - 1);
+        buf[buf_size - 1] = '\0';
+        return;
+    }
     pthread_mutex_lock(&gl.mutex);
     strncpy(buf, gl.local_ip, buf_size - 1);
     buf[buf_size - 1] = '\0';
@@ -1189,6 +1200,7 @@ void GBALink_getLocalIPSafe(char* buf, size_t buf_size) {
 const char* GBALink_getLocalIP(void) { return gl.local_ip; }
 
 bool GBALink_isUsingHotspot(void) {
+    if (!gl.initialized) return false;
     pthread_mutex_lock(&gl.mutex);
     bool using_hotspot = gl.using_hotspot;
     pthread_mutex_unlock(&gl.mutex);
@@ -1201,6 +1213,7 @@ bool GBALink_hasNetworkConnection(void) {
 }
 
 void GBALink_update(void) {
+    if (!gl.initialized) return;
     pthread_mutex_lock(&gl.mutex);
 
     // Process pending host connection notification (must run on main thread)

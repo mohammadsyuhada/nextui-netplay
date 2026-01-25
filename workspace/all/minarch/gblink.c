@@ -135,7 +135,7 @@ void GBLink_quit(void) {
     // (the core may already be in an invalid state)
     gl.quitting = true;
 
-    // Stop all link activity using fast version to skip blocking PLAT_stopHotspot
+    // Stop all link activity using fast version
     GBLink_stopAllFast();
     GBLink_stopDiscovery();
 
@@ -309,9 +309,6 @@ static int GBLink_stopHostInternal(bool skip_hotspot_cleanup) {
 #ifdef HAS_WIFIMG
             WIFI_direct_stopHotspot();
             WIFI_direct_restorePreviousConnection();
-#else
-            PLAT_stopHotspot();
-            PLAT_wifiRestorePreviousConnection();
 #endif
         }
         gl.using_hotspot = false;

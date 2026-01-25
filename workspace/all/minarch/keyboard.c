@@ -13,7 +13,8 @@
 #include "api.h"
 
 // External globals from minarch.c
-extern SDL_Surface* screen;
+extern SDL_Surface* minarch_getScreen(void);
+#define screen minarch_getScreen()
 extern struct GFX_Fonts font;
 
 // External functions from minarch.c

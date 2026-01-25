@@ -178,7 +178,7 @@ void Netplay_quit(void) {
     bool needs_hotspot_cleanup = np.using_hotspot || netplay_connected_to_hotspot;
 
     Netplay_disconnect();
-    Netplay_stopHostFast();  // Use fast version to skip blocking PLAT_stopHotspot
+    Netplay_stopHostFast();
     Netplay_stopDiscovery();
 
     // Handle hotspot cleanup asynchronously
@@ -332,8 +332,6 @@ static int Netplay_stopHostInternal(bool skip_hotspot_cleanup) {
         if (!skip_hotspot_cleanup) {
 #ifdef HAS_WIFIMG
             WIFI_direct_stopHotspot();
-#else
-            PLAT_stopHotspot();
 #endif
         }
         np.using_hotspot = false;

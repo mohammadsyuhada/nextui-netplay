@@ -78,7 +78,7 @@ bool Netplay_checkCoreSupport(const char* core_name);
 // If hotspot_ip is NULL, uses WiFi mode. Otherwise, uses hotspot mode with given IP.
 int Netplay_startHost(const char* game_name, uint32_t game_crc, const char* hotspot_ip);
 int Netplay_stopHost(void);
-int Netplay_stopHostFast(void);  // Skips blocking PLAT_stopHotspot - use with async cleanup
+int Netplay_stopHostFast(void);
 void Netplay_stopBroadcast(void);  // Stop UDP broadcast but keep session active
 int Netplay_connectToHost(const char* ip, uint16_t port);
 void Netplay_disconnect(void);
