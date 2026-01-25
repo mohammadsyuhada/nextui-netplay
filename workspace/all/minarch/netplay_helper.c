@@ -21,27 +21,19 @@
 // Extern declarations for minarch globals (defined in minarch.c)
 //////////////////////////////////////////////////////////////////////////////
 
-extern SDL_Surface* screen;
-extern int DEVICE_WIDTH;
-extern int DEVICE_HEIGHT;
+// Use accessor functions to avoid symbol conflicts with cores
+extern SDL_Surface* minarch_getScreen(void);
+extern int minarch_getDeviceWidth(void);
+extern int minarch_getDeviceHeight(void);
+#define screen minarch_getScreen()
+#define DEVICE_WIDTH minarch_getDeviceWidth()
+#define DEVICE_HEIGHT minarch_getDeviceHeight()
 
-// Menu state (defined in minarch.c) - we only need the bitmap field
-extern struct {
-    SDL_Surface* bitmap;
-    SDL_Surface* overlay;
-    char* items[6];  // MENU_ITEM_COUNT
-    char* disc_paths[9];
-    char minui_dir[256];
-    char slot_path[256];
-    char base_path[256];
-    char bmp_path[256];
-    char txt_path[256];
-    int disc;
-    int total_discs;
-    int slot;
-    int save_exists;
-    int preview_exists;
-} menu;
+// Menu bitmap accessor (defined in minarch.c)
+extern SDL_Surface* minarch_getMenuBitmap(void);
+// Create a fake menu struct with just bitmap for compatibility
+static struct { SDL_Surface* bitmap; } _menu_accessor;
+#define menu (_menu_accessor.bitmap = minarch_getMenuBitmap(), _menu_accessor)
 
 // Accessor functions for core/game state (defined in minarch.c)
 // These avoid struct layout mismatches with LTO
@@ -61,8 +53,7 @@ extern void minarch_forceCoreOptionUpdate(void);
 
 // Save config and reload game (for link mode sync)
 extern void minarch_saveConfig(void);
-extern void minarch_reloadGame(void);
-extern void minarch_requestReload(void);  // Deferred reload - use from menu callbacks
+extern void minarch_reloadGame(void);  // Reload game to apply option changes
 
 // Menu functions (defined in minarch.c)
 extern void Menu_beforeSleep(void);
@@ -893,8 +884,6 @@ static void* hotspot_stop_thread(void* arg) {
     if (args->stop_hotspot) {
 #ifdef HAS_WIFIMG
         WIFI_direct_stopHotspot();
-#else
-        PLAT_stopHotspot();
 #endif
     }
 
@@ -906,8 +895,6 @@ static void* hotspot_stop_thread(void* arg) {
     // Restore previous WiFi connection
 #ifdef HAS_WIFIMG
     WIFI_direct_restorePreviousConnection();
-#else
-    PLAT_wifiRestorePreviousConnection();
 #endif
 
     free(args);
@@ -1879,7 +1866,7 @@ int hostGame_common(LinkType type, void* list, int i) {
                     // Apply setting, save, reload
                     OptionList_setOptionValue(minarch_getCoreOptionList(), "gpsp_serial", new_mode);
                     minarch_saveConfig();
-                    minarch_requestReload();  // Deferred to avoid segfault
+                    minarch_reloadGame();  // Deferred to avoid segfault
                     // Set force_resume to close all menus
                     gbalink_force_resume = 1;
                     return MENU_CALLBACK_EXIT;
@@ -1947,16 +1934,6 @@ int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
 
     // Get hotspot IP
     const char* hotspot_ip = WIFI_direct_getHotspotIP();
-#else
-    const char* pass = PLAT_getHotspotPassword();
-
-    if (PLAT_startHotspot(ssid, pass) != 0) {
-        Menu_message("Failed to start hotspot.\nCheck device capabilities.", (char*[]){ "A","OKAY", NULL });
-        return MENU_CALLBACK_NOP;
-    }
-
-    // Get hotspot IP
-    const char* hotspot_ip = PLAT_getHotspotIP();
 #endif
 
     // Start host with hotspot IP
@@ -1975,8 +1952,6 @@ int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
     if (start_result != 0) {
 #ifdef HAS_WIFIMG
         WIFI_direct_stopHotspot();
-#else
-        PLAT_stopHotspot();
 #endif
         Menu_message("Failed to start host.\nCheck device capabilities.", (char*[]){ "A","OKAY", NULL });
         return MENU_CALLBACK_NOP;
@@ -2447,7 +2422,7 @@ int joinGameWiFi_common(LinkType type) {
                 // User confirmed - apply mode, save config, reload (no TCP connection was made)
                 OptionList_setOptionValue(minarch_getCoreOptionList(), "gpsp_serial", host_mode);
                 minarch_saveConfig();
-                minarch_requestReload();  // Deferred to avoid segfault
+                minarch_reloadGame();  // Deferred to avoid segfault
                 gbalink_force_resume = 1;
                 return MENU_CALLBACK_EXIT;
             } else {
@@ -2485,7 +2460,7 @@ int joinGameWiFi_common(LinkType type) {
             GBALink_applyPendingLinkMode();
             minarch_saveConfig();
             GBALink_disconnect();
-            minarch_requestReload();  // Deferred to avoid segfault
+            minarch_reloadGame();  // Deferred to avoid segfault
             // Set force_resume to close all menus
             gbalink_force_resume = 1;
             return MENU_CALLBACK_EXIT;
@@ -2552,8 +2527,6 @@ int joinGame_Hotspot_common(LinkType type) {
 #ifdef HAS_WIFIMG
     // Use wifi_direct for more reliable scanning (bypasses wifi_daemon)
     int hotspot_count = WIFI_direct_scanForHotspots(LINK_HOTSPOT_SSID_PREFIX, hotspots, 8);
-#else
-    int hotspot_count = PLAT_wifiScanForHotspots(LINK_HOTSPOT_SSID_PREFIX, hotspots, 8);
 #endif
 
     if (hotspot_count == 0) {
@@ -2658,8 +2631,6 @@ int joinGame_Hotspot_common(LinkType type) {
 
 #ifdef HAS_WIFIMG
     const char* hotspot_pass = WIFI_direct_getHotspotPassword();
-#else
-    const char* hotspot_pass = PLAT_getHotspotPassword();
 #endif
 
     // Connect to selected hotspot
@@ -2671,14 +2642,11 @@ int joinGame_Hotspot_common(LinkType type) {
 #ifdef HAS_WIFIMG
     // Use wifi_direct for more reliable connection (bypasses wifi_daemon)
     int wifi_connect_result = WIFI_direct_connect(selected_ssid, hotspot_pass);
-#else
-    int wifi_connect_result = PLAT_wifiConnectToSSID(selected_ssid, hotspot_pass);
 #endif
+
     if (wifi_connect_result != 0) {
 #ifdef HAS_WIFIMG
         WIFI_direct_restorePreviousConnection();  // Restore WiFi so next scan works
-#else
-        PLAT_wifiRestorePreviousConnection();  // Restore WiFi so next scan works
 #endif
         Menu_message("Failed to connect to host.", (char*[]){ "A","OKAY", NULL });
         return MENU_CALLBACK_NOP;
@@ -2699,8 +2667,6 @@ int joinGame_Hotspot_common(LinkType type) {
     // On hotspot network, host is always at fixed IP
 #ifdef HAS_WIFIMG
     const char* host_ip = WIFI_direct_getHotspotIP();
-#else
-    const char* host_ip = PLAT_getHotspotIP();
 #endif
 
     // For GBALink, query host's link_mode directly BEFORE TCP connection
@@ -2723,19 +2689,15 @@ int joinGame_Hotspot_common(LinkType type) {
                     minarch_saveConfig();
 #ifdef HAS_WIFIMG
                     WIFI_direct_restorePreviousConnection();
-#else
-                    PLAT_wifiRestorePreviousConnection();
 #endif
                     *connected_to_hotspot_flag = 0;
-                    minarch_requestReload();  // Deferred to avoid segfault
+                    minarch_reloadGame();  // Deferred to avoid segfault
                     gbalink_force_resume = 1;
                     return MENU_CALLBACK_EXIT;
                 } else {
                     // User cancelled - disconnect from hotspot
 #ifdef HAS_WIFIMG
                     WIFI_direct_restorePreviousConnection();
-#else
-                    PLAT_wifiRestorePreviousConnection();
 #endif
                     *connected_to_hotspot_flag = 0;
                     return MENU_CALLBACK_NOP;
@@ -2764,8 +2726,6 @@ int joinGame_Hotspot_common(LinkType type) {
         Menu_message("Failed to connect to host.\n\nConnection timed out.", (char*[]){ "A","OKAY", NULL });
 #ifdef HAS_WIFIMG
         WIFI_direct_restorePreviousConnection();
-#else
-        PLAT_wifiRestorePreviousConnection();
 #endif
         *connected_to_hotspot_flag = 0;
         return MENU_CALLBACK_NOP;
@@ -2781,7 +2741,7 @@ int joinGame_Hotspot_common(LinkType type) {
             GBALink_applyPendingLinkMode();
             minarch_saveConfig();
             GBALink_disconnect();
-            minarch_requestReload();  // Deferred to avoid segfault
+            minarch_reloadGame();  // Deferred to avoid segfault
             // Set force_resume to close all menus
             gbalink_force_resume = 1;
             return MENU_CALLBACK_EXIT;
@@ -2791,8 +2751,6 @@ int joinGame_Hotspot_common(LinkType type) {
             GBALink_disconnect();
 #ifdef HAS_WIFIMG
             WIFI_direct_restorePreviousConnection();
-#else
-            PLAT_wifiRestorePreviousConnection();
 #endif
             *connected_to_hotspot_flag = 0;
             return MENU_CALLBACK_NOP;
@@ -2867,7 +2825,6 @@ int disconnect_common(LinkType type, void* list, int i) {
     showTransitionMessage("Disconnecting...");
 
     // Capture hotspot state, disconnect, and stop host in one switch
-    // Uses fast versions to skip blocking PLAT_stopHotspot
     bool was_host = false;
     bool needs_hotspot_cleanup = false;
 
@@ -3007,8 +2964,6 @@ int status_common(LinkType type) {
     if (is_using_hotspot && mode_host) {
 #ifdef HAS_WIFIMG
         const char* ssid = WIFI_direct_getHotspotSSID();
-#else
-        const char* ssid = PLAT_getHotspotSSID();
 #endif
         size_t ssid_len = ssid ? strlen(ssid) : 0;
         size_t prefix_len = strlen(LINK_HOTSPOT_SSID_PREFIX);

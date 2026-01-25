@@ -27,19 +27,11 @@ void OptionList_setOptionValue(OptionList* list, const char* key, const char* va
 // Runs one frame with video output suppressed to trigger check_variables()
 void minarch_forceCoreOptionUpdate(void);
 
-// Reset the core (reinitializes game state including serial mode)
-void minarch_resetCore(void);
-
-// Save current config to file (preserves option changes before core reset)
+// Save current config to file
 void minarch_saveConfig(void);
 
-// Reload the game to reinitialize core state (including serial mode)
+// Reload game to apply option changes (e.g., gpSP serial mode)
+// Unloads and reloads ROM so core re-reads options during load_game()
 void minarch_reloadGame(void);
-
-// Deferred reload - use this from menu callbacks to avoid segfaults
-// The actual reload happens after the menu closes
-void minarch_requestReload(void);
-int minarch_hasPendingReload(void);
-void minarch_doPendingReload(void);
 
 #endif /* MINARCH_H */

@@ -37,6 +37,7 @@
 ///////////////////////////////////////
 
 SDL_Surface* screen;
+
 static int quit = 0;
 static int newScreenshot = 0;
 static int show_menu = 0;
@@ -86,24 +87,35 @@ int DEVICE_PITCH = 0; // FIXED_PITCH;
 
 GFX_Renderer renderer;
 
+// Accessor function for external modules
+SDL_Surface* minarch_getScreen(void) {
+	return screen;
+}
+int minarch_getDeviceWidth(void) {
+	return DEVICE_WIDTH;
+}
+int minarch_getDeviceHeight(void) {
+	return DEVICE_HEIGHT;
+}
+
 ///////////////////////////////////////
 
-struct {
+static struct Core {
 	int initialized;
 	int need_fullpath;
-
+	
 	const char tag[8]; // eg. GBC
 	const char name[128]; // eg. gambatte
 	const char version[128]; // eg. Gambatte (v0.5.0-netlink 7e02df6)
 	const char extensions[128]; // eg. gb|gbc|dmg
-
+	
 	const char config_dir[MAX_PATH]; // eg. /mnt/sdcard/.userdata/rg35xx/GB-gambatte
 	const char states_dir[MAX_PATH]; // eg. /mnt/sdcard/.userdata/arm-480/GB-gambatte
 	const char saves_dir[MAX_PATH]; // eg. /mnt/sdcard/Saves/GB
 	const char bios_dir[MAX_PATH]; // eg. /mnt/sdcard/Bios/GB
 	const char cheats_dir[MAX_PATH]; // eg. /mnt/sdcard/Cheats/GB
 	const char overlays_dir[MAX_PATH]; // eg. /mnt/sdcard/Cheats/GB
-
+	
 	double fps;
 	double sample_rate;
 	double aspect_ratio;
@@ -111,11 +123,11 @@ struct {
 	void* handle;
 	void (*init)(void);
 	void (*deinit)(void);
-
+	
 	void (*get_system_info)(struct retro_system_info *info);
 	void (*get_system_av_info)(struct retro_system_av_info *info);
 	void (*set_controller_port_device)(unsigned port, unsigned device);
-
+	
 	void (*reset)(void);
 	void (*run)(void);
 	size_t (*serialize_size)(void);
@@ -129,7 +141,7 @@ struct {
 	unsigned (*get_region)(void);
 	void *(*get_memory_data)(unsigned id);
 	size_t (*get_memory_size)(unsigned id);
-
+	
 	retro_core_options_update_display_callback_t update_visibility_callback;
 	// retro_audio_buffer_status_callback_t audio_buffer_status;
 
@@ -146,7 +158,7 @@ struct {
 int extract_zip(char** extensions);
 static bool getAlias(char* path, char* alias);
 
-struct {
+static struct Game {
 	char path[MAX_PATH];
 	char name[MAX_PATH]; // TODO: rename to basename?
 	char alt_name[MAX_PATH]; // alternate name, eg. unzipped rom file name
@@ -2185,7 +2197,6 @@ char** list_files_in_folder(const char* folderPath, int* fileCount, const char* 
 
 
 
-void OptionList_setOptionValue(OptionList* list, const char* key, const char* value);
 enum {
 	CONFIG_WRITE_ALL,
 	CONFIG_WRITE_GAME,
@@ -3173,8 +3184,9 @@ void OptionList_setOptionValue(OptionList* list, const char* key, const char* va
 		} else {
 			list->changed = 1;
 		}
+		// LOG_info("\tSET %s (%s) TO %s (%s)\n", item->name, item->key, item->labels[item->value], item->values[item->value]);
 		// if (list->on_set) list->on_set(list, key);
-
+		
 		if (exactMatch((char*)core.tag, "GB") && containsString(item->key, "palette")) Special_updatedDMGPalette(2); // from core
 	}
 	else LOG_info("unknown option %s \n", key);
@@ -3203,47 +3215,9 @@ void minarch_forceCoreOptionUpdate(void) {
 	skip_video_output = 0;
 }
 
-// Reset the core (used to reinitialize serial mode after option change)
-void minarch_resetCore(void) {
-	if (core.reset) {
-		core.reset();
-	}
-}
-
 // Save current config to file (used before core reset to preserve option changes)
 void minarch_saveConfig(void) {
 	Config_write(CONFIG_WRITE_ALL);
-}
-
-// Forward declaration for Core_load (defined later in file)
-void Core_load(void);
-
-// Reload the game to reinitialize core state (including serial mode)
-// This is more thorough than reset - it unloads and reloads the ROM
-void minarch_reloadGame(void) {
-	// Save current state
-	SRAM_write();
-	// Unload and reload the game
-	core.unload_game();
-	Core_load();
-}
-
-// Deferred reload mechanism - avoids segfaults when called from menu callbacks
-static int pending_reload = 0;
-
-void minarch_requestReload(void) {
-	pending_reload = 1;
-}
-
-int minarch_hasPendingReload(void) {
-	return pending_reload;
-}
-
-void minarch_doPendingReload(void) {
-	if (pending_reload) {
-		pending_reload = 0;
-		minarch_reloadGame();
-	}
 }
 
 // Wrapper for libretro log callback to intercept core messages
@@ -3299,7 +3273,7 @@ static void input_poll_callback(void) {
 		Menu_saveState();
 		putFile(GAME_SWITCHER_PERSIST_PATH, game.path + strlen(SDCARD_PATH));
 		GFX_clear(screen);
-
+		
 	}
 	
 	if (PAD_justPressed(BTN_POWER)) {
@@ -3523,7 +3497,7 @@ static bool set_rumble_state(unsigned port, enum retro_rumble_effect effect, uin
 }
 static bool environment_callback(unsigned cmd, void *data) { // copied from picoarch initially
 	// LOG_info("environment_callback: %i\n", cmd);
-
+	
 	switch(cmd) {
 	// case RETRO_ENVIRONMENT_SET_ROTATION: { /* 1 */
 	// 	LOG_info("RETRO_ENVIRONMENT_SET_ROTATION %i\n", *(int *)data); // core requests frontend to handle rotation
@@ -3803,7 +3777,7 @@ static bool environment_callback(unsigned cmd, void *data) { // copied from pico
 		// puts("RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2");
 		if (data) {
 			OptionList_reset();
-			OptionList_v2_init((const struct retro_core_options_v2 *)data);
+			OptionList_v2_init((const struct retro_core_options_v2 *)data); 
 		}
 		break;
 	}
@@ -3860,7 +3834,7 @@ static bool environment_callback(unsigned cmd, void *data) { // copied from pico
 	case RETRO_ENVIRONMENT_SET_HW_RENDER:
 	{
 		struct retro_hw_render_callback *cb = (struct retro_hw_render_callback*)data;
-
+		
 		// Log the requested context
 		LOG_info("Core requested GL context type: %d, version %d.%d\n", 
 			cb->context_type, cb->version_major, cb->version_minor);
@@ -4840,12 +4814,10 @@ static Uint32* rgbaData = NULL;
 static size_t rgbaDataSize = 0;
 
 static void video_refresh_callback(const void* data, unsigned width, unsigned height, size_t pitch) {
-
-	// Skip rendering if flag is set (used during forced core.run() for option processing)
-	// or if quitting (core may still call callback after quit)
-	// I need to check quit here because sometimes quit is true but callback is still called by the core after and it still runs one more frame and it looks ugly :D
+	// Skip video output during forced core.run() calls (e.g., for link option processing)
 	if(skip_video_output || quit) return;
 
+	// I need to check quit here because sometimes quit is true but callback is still called by the core after and it still runs one more frame and it looks ugly :D
 	if(1) {
 		if (!rgbaData || rgbaDataSize != width * height) {
 			if (rgbaData) free(rgbaData);
@@ -4930,7 +4902,7 @@ static size_t audio_sample_batch_callback(const int16_t *data, size_t frames) {
 		}
 	}
 	else return frames;
-}
+};
 
 ///////////////////////////////////////
 
@@ -5109,6 +5081,22 @@ void Core_close(void) {
 	if (core.handle) dlclose(core.handle);
 }
 
+// Reload the game to reinitialize core state (e.g., for gpSP serial mode changes)
+// Unloads and reloads the ROM so the core re-reads options during load_game()
+void minarch_reloadGame(void) {
+	SRAM_write();
+	core.unload_game();
+
+	struct retro_game_info game_info;
+	game_info.path = game.tmp_path[0] ? game.tmp_path : game.path;
+	game_info.data = game.data;
+	game_info.size = game.size;
+	core.load_game(&game_info);
+
+	SRAM_read();
+	Core_updateAVInfo();
+}
+
 ///////////////////////////////////////
 
 #define MENU_ITEM_COUNT 6
@@ -5165,6 +5153,11 @@ struct {
 		[ITEM_QUIT] = "Quit",
 	}
 };
+
+// Accessor functions for netplay_helper.c
+SDL_Surface* minarch_getMenuBitmap(void) {
+	return menu.bitmap;
+}
 
 void Menu_init(void) {
 	menu.overlay = SDL_CreateRGBSurfaceWithFormat(SDL_SWSURFACE,DEVICE_WIDTH,DEVICE_HEIGHT,32,SDL_PIXELFORMAT_RGBA8888);
@@ -5234,6 +5227,7 @@ void Menu_afterSleep() {
 
 typedef struct MenuList MenuList;
 typedef struct MenuItem MenuItem;
+// MENU_CALLBACK_* enum now defined in minarch.h
 typedef int (*MenuList_callback_t)(MenuList* list, int i);
 typedef struct MenuItem {
 	char* name;
@@ -5976,7 +5970,7 @@ static MenuList options_menu = {
 		{"Shaders",.on_confirm=OptionShaders_openMenu},
 		{"Cheats",.on_confirm=OptionCheats_openMenu},
 		{"Controls",.on_confirm=OptionControls_openMenu},
-		{"Shortcuts",.on_confirm=OptionShortcuts_openMenu},
+		{"Shortcuts",.on_confirm=OptionShortcuts_openMenu}, 
 		{"Save Changes",.on_confirm=OptionSaveChanges_openMenu},
 		{NULL},
 		{NULL},
@@ -5984,7 +5978,7 @@ static MenuList options_menu = {
 };
 
 static void OptionSaveChanges_updateDesc(void) {
-	options_menu.items[6].desc = getSaveDesc(); // Save Changes is at index 6
+	options_menu.items[6].desc = getSaveDesc();
 }
 
 #define OPTION_PADDING 8
@@ -6040,7 +6034,7 @@ static int Menu_options(MenuList* list) {
 	int show_settings = 0;
 	int await_input = 0;
 	int should_exit = 0;  // Track if we should propagate exit to caller
-	
+
 	// dependent on option list offset top and bottom, eg. the gray triangles
 	int max_visible_options = (screen->h - ((SCALE1(PADDING + PILL_SIZE) * 2) + SCALE1(BUTTON_SIZE))) / SCALE1(BUTTON_SIZE); // 7 for 480, 10 for 720
 	
@@ -6432,13 +6426,13 @@ static int Menu_options(MenuList* list) {
 				w,h
 			});
 		}
-
+		
 		GFX_flip(screen);
 		dirty = 0;
-
+		
 		hdmimon();
 	}
-
+	
 	// GFX_clearAll();
 	// GFX_flip(screen);
 
@@ -6712,7 +6706,7 @@ static void Menu_loadState(void) {
 	}
 
 	Menu_updateState();
-
+	
 	if (menu.save_exists) {
 		if (menu.total_discs) {
 			char slot_disc_name[256];
@@ -6907,7 +6901,7 @@ static void Menu_loop(void) {
 						int menu_result = Menu_options(&options_menu);
 						if (screen_scaling!=old_scaling) {
 							selectScaler(renderer.true_w,renderer.true_h,renderer.src_p);
-
+						
 							restore_w = screen->w;
 							restore_h = screen->h;
 							restore_p = screen->pitch;
@@ -6989,7 +6983,7 @@ static void Menu_loop(void) {
 			else GFX_blitButtonGroup((char*[]){ BTN_SLEEP==BTN_POWER?"POWER":"MENU","SLEEP", NULL }, 0, screen, 0);
 			GFX_blitButtonGroup((char*[]){ "B","BACK", "A","OKAY", NULL }, 1, screen, 1);
 			
-			// list - calculate visible item count (may exclude netplay for some cores)
+			// list
 			// Hide Save/Load during multiplayer to prevent connection breaks
 			int multiplayer_active = GBALink_isConnected() || GBLink_isConnected() || Netplay_isConnected();
 			int visible_item_count = MENU_ITEM_COUNT;
@@ -7005,12 +6999,12 @@ static void Menu_loop(void) {
 
 				char* item = menu.items[i];
 				SDL_Color text_color = COLOR_WHITE;
-
+				
 				if (i==selected) {
 					text_color = uintToColour(THEME_COLOR5_255);
 
 					// disc change
-					if (menu.total_discs>1 && i==ITEM_CONT) {
+					if (menu.total_discs>1 && i==ITEM_CONT) {				
 						GFX_blitPillDark(ASSET_WHITE_PILL, screen, &(SDL_Rect){
 							SCALE1(PADDING),
 							SCALE1(oy + PADDING),
@@ -7024,10 +7018,10 @@ static void Menu_loop(void) {
 						});
 						SDL_FreeSurface(text);
 					}
-
+					
 					TTF_SizeUTF8(font.large, item, &ow, NULL);
 					ow += SCALE1(BUTTON_PADDING*2);
-
+					
 					// pill
 					GFX_blitPillDark(ASSET_WHITE_PILL, screen, &(SDL_Rect){
 						SCALE1(PADDING),
@@ -7036,8 +7030,8 @@ static void Menu_loop(void) {
 						SCALE1(PILL_SIZE)
 					});
 				}
-
-
+			
+				
 				// text
 				text = TTF_RenderUTF8_Blended(font.large, item, text_color);
 				SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){
@@ -7130,12 +7124,8 @@ static void Menu_loop(void) {
 
 		setOverclock(overclock); // restore overclock value
 		if (rumble_strength) VIB_setStrength(rumble_strength);
-
+		
 		if (!HAS_POWER_BUTTON) PWR_disableSleep();
-
-		// Handle deferred reload (from link mode change dialogs)
-		// Must be done after menu cleanup to avoid graphics state conflicts
-		minarch_doPendingReload();
 	}
 	else if (exists(NOUI_PATH)) PWR_powerOff(0); // TODO: won't work with threaded core, only check this once per launch
 	
@@ -7386,7 +7376,6 @@ int main(int argc , char* argv[]) {
 	Config_free();
 
 	LOG_info("total startup time %ims\n\n",SDL_GetTicks());
-
 	while (!quit) {
 		GFX_startFrame();
 
@@ -7405,7 +7394,6 @@ int main(int argc , char* argv[]) {
 		if (Netplay_isActive()) {
 			Netplay_postFrame();
 		}
-
 		limitFF();
 		trackFPS();
 		
@@ -7428,6 +7416,7 @@ int main(int argc , char* argv[]) {
 			}
 			PWR_updateFrequency(PWR_UPDATE_FREQ,1);
 			Menu_loop();
+
 			// Resume netplay connection after menu closes
 			if (Netplay_isPaused()) {
 				Netplay_resume();
