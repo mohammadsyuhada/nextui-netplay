@@ -61,6 +61,9 @@ int WIFI_direct_connect(const char* ssid, const char* pass);
 // Disconnect from current network
 void WIFI_direct_disconnect(void);
 
+// Forget (remove) a saved network by SSID
+void WIFI_direct_forget(const char* ssid);
+
 // Scan for hotspots matching a prefix
 // Returns number of hotspots found
 // ssids_out should be an array of char[WIFI_DIRECT_SSID_MAX]

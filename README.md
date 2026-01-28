@@ -4,7 +4,7 @@ Drop-in patches and pre-built binaries to add LAN multiplayer and GBA Link suppo
 
 > This repository contains only the modified source files and build artifacts—not the full NextUI codebase. If you want to build from source, clone the [official NextUI repository](https://github.com/LoveRetro/NextUI) and replace the relevant files.
 
-⭐ If you enjoy using this project, consider supporting me on [Ko-fi](https://ko-fi.com/mohammadsyuhada) ☕
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/Y8Y61SI04B)
 
 <img width="50%" alt="Pokemon - FireRed 2026-01-23-03-30-57" src="https://github.com/user-attachments/assets/54070772-8cd8-43ab-ba14-eba55abf62dc" />
 <img width="50%" alt="Pokemon - FireRed 2026-01-23-03-23-29" src="https://github.com/user-attachments/assets/f35be7df-92d1-418a-8961-13b155000f72" />
@@ -32,7 +32,7 @@ True multiplayer for GameBoy Advance/Game Boy Color/Game Boy. Each player has th
 
 | | |
 |---|---|
-| **NextUI Version** | v6.6.0 ([Release](https://github.com/LoveRetro/NextUI/releases/tag/v6.6.0)) |
+| **NextUI Version** | v6.7.2 ([Release](https://github.com/LoveRetro/NextUI/releases/tag/v6.7.2)) |
 | **Tested Devices** | TrimUI Brick, TrimUI Brick Hammer |
 
 ## Supported Platforms

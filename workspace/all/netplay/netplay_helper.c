@@ -230,9 +230,6 @@ static void showWiFiHelpDialog(void) {
 // connected_ssid: SSID of currently connected network (or NULL if not connected)
 #ifdef HAS_WIFIMG
 static void renderWiFiNetworkList(WIFI_direct_network_t* networks, int count, int selected, const char* connected_ssid) {
-#else
-static void renderWiFiNetworkList(struct WIFI_network* networks, int count, int selected, const char* connected_ssid) {
-#endif
     GFX_clear(screen);
     GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.15f, 1, 0);
 
@@ -293,21 +290,12 @@ static void renderWiFiNetworkList(struct WIFI_network* networks, int count, int 
         const char* signal;
         const char* ssid;
 
-#ifdef HAS_WIFIMG
         WIFI_direct_network_t* net = &networks[idx];
         ssid = net->ssid;
         is_connected = (connected_ssid && strcmp(ssid, connected_ssid) == 0);
         has_creds = net->has_saved_creds;
         is_secured = net->is_secured;
         signal = getSignalStrengthIndicator(net->rssi);
-#else
-        struct WIFI_network* net = &networks[idx];
-        ssid = net->ssid;
-        is_connected = (connected_ssid && strcmp(ssid, connected_ssid) == 0);
-        has_creds = PLAT_wifiHasCredentials(net->ssid, net->security);
-        is_secured = (net->security != SECURITY_NONE);
-        signal = getSignalStrengthIndicator(net->rssi);
-#endif
 
         const char* status;
         if (is_connected) {
@@ -379,6 +367,7 @@ static void renderWiFiNetworkList(struct WIFI_network* networks, int count, int 
     GFX_blitButtonGroup((char*[]){ "B","BACK", "A","SELECT", NULL }, 1, screen, 1);  // Right aligned
     GFX_flip(screen);
 }
+#endif // HAS_WIFIMG
 
 // Show WiFi network selection UI
 // Returns true if user successfully connects (or confirms current connection), false if cancelled/failed
@@ -642,172 +631,28 @@ static bool showWiFiNetworkSelection(void) {
     }
 
 #else
-    // Fallback to PLAT_* functions for platforms without HAS_WIFIMG
-
-    // Ensure WiFi is enabled first
-    if (!ensureWifiEnabled()) {
-        return false;  // User cancelled or WiFi failed to enable
-    }
-
-    // Check if already connected to a WiFi network
-    struct WIFI_connection current_conn;
-    char connected_ssid_buf[SSID_MAX] = {0};
-    const char* connected_ssid = NULL;
-
-    if (PLAT_wifiConnected() && PLAT_wifiConnection(&current_conn) == 0 && current_conn.valid) {
-        strncpy(connected_ssid_buf, current_conn.ssid, sizeof(connected_ssid_buf) - 1);
-        connected_ssid = connected_ssid_buf;
-    }
-
-    // Network list - continuously updated
-    struct WIFI_network networks[16];
-    int count = 0;
-    int selected = 0;
-    int dirty = 1;
-    bool first_selection_done = false;
-
-    // Scan timing
-    uint32_t last_scan_time = 0;
-    uint32_t scan_interval_ms = 3000;  // Rescan every 3 seconds
-
-    while (1) {
-        uint32_t now = SDL_GetTicks();
-
-        // Periodic WiFi scan
-        if (now - last_scan_time >= scan_interval_ms || last_scan_time == 0) {
-            last_scan_time = now;
-
-            int new_count = PLAT_wifiScan(networks, 16);
-
-            if (new_count != count) {
-                count = new_count;
-                dirty = 1;
-
-                // Auto-select best network on first successful scan
-                if (count > 0 && !first_selection_done) {
-                    first_selection_done = true;
-
-                    // Find the best network to pre-select
-                    int preselect_idx = -1;
-                    int best_saved_idx = -1;
-                    int best_rssi = -999;
-
-                    for (int i = 0; i < count; i++) {
-                        if (connected_ssid && strcmp(networks[i].ssid, connected_ssid) == 0) {
-                            preselect_idx = i;
-                        }
-                        bool has_creds = PLAT_wifiHasCredentials(networks[i].ssid, networks[i].security);
-                        if (has_creds && networks[i].rssi > best_rssi) {
-                            best_rssi = networks[i].rssi;
-                            best_saved_idx = i;
-                        }
-                    }
-
-                    if (preselect_idx >= 0) {
-                        selected = preselect_idx;
-                    } else if (best_saved_idx >= 0) {
-                        selected = best_saved_idx;
-                    } else {
-                        selected = 0;
-                    }
-                }
-
-                // Keep selection in bounds
-                if (selected >= count && count > 0) {
-                    selected = count - 1;
-                }
-            }
-        }
-
-        GFX_startFrame();
-        PAD_poll();
-
-        if (PAD_justPressed(BTN_B)) {
-            return false;  // Cancel
-        }
-
-        // Navigation (only if we have networks)
-        if (count > 0) {
-            if (PAD_justRepeated(BTN_UP)) {
-                selected--;
-                if (selected < 0) selected = count - 1;
-                dirty = 1;
-            }
-            else if (PAD_justRepeated(BTN_DOWN)) {
-                selected++;
-                if (selected >= count) selected = 0;
-                dirty = 1;
-            }
-            else if (PAD_justPressed(BTN_A)) {
-                // Selected network
-                struct WIFI_network* net = &networks[selected];
-
-                // Check if user selected the already-connected network
-                if (connected_ssid && strcmp(net->ssid, connected_ssid) == 0) {
-                    // Already connected to this network, just continue
-                    return true;
-                }
-
-                bool has_creds = PLAT_wifiHasCredentials(net->ssid, net->security);
-
-                if (has_creds || net->security == SECURITY_NONE) {
-                    // Connect with saved credentials or open network
-                    showOverlayMessage("Connecting...");
-                    PLAT_wifiConnect(net->ssid, net->security);
-
-                    // Wait for connection (with timeout)
-                    for (int i = 0; i < 100; i++) {  // 10 second timeout
-                        SDL_Delay(100);
-                        if (PLAT_wifiConnected()) {
-                            return true;
-                        }
-                    }
-                    Menu_message("Connection failed.\n\nPlease check the network\nand try again.",
-                                 (char*[]){ "A","OKAY", NULL });
-                    dirty = 1;
-                    last_scan_time = 0;  // Force rescan
-                } else {
-                    // Need password - launch keyboard
-                    char* password = launchKeyboard();
-                    if (password) {
-                        showOverlayMessage("Connecting...");
-                        PLAT_wifiConnectPass(net->ssid, net->security, password);
-                        free(password);
-
-                        // Wait for connection
-                        for (int i = 0; i < 100; i++) {  // 10 second timeout
-                            SDL_Delay(100);
-                            if (PLAT_wifiConnected()) {
-                                return true;
-                            }
-                        }
-                        Menu_message("Connection failed.\n\nIncorrect password or\nnetwork unavailable.",
-                                     (char*[]){ "A","OKAY", NULL });
-                    }
-                    dirty = 1;
-                    last_scan_time = 0;  // Force rescan
-                }
-            }
-        }
-
-        PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
-
-        if (dirty) {
-            renderWiFiNetworkList(networks, count, selected, connected_ssid);
-            dirty = 0;
-        }
-
-        hdmimon();
-    }
+    // WiFi network selection not available on this platform
+    Menu_message("WiFi not available\non this platform.",
+                 (char*[]){ "A","OKAY", NULL });
+    return false;
 #endif
 }
 
 bool ensureWifiEnabled(void) {
-    if (PLAT_wifiEnabled()) {
+#ifdef HAS_WIFIMG
+    // Check if WiFi is already ready (avoid showing message if already enabled)
+    if (WIFI_direct_isConnected()) {
+        return true;  // Already connected, no need to enable
+    }
+
+    // Check if wpa_supplicant is running (quick check without full ensureReady)
+    int ret = system("pidof wpa_supplicant > /dev/null 2>&1");
+    if (ret == 0) {
+        // wpa_supplicant running, WiFi is likely ready
         return true;
     }
 
-    // Show enabling message
+    // Show enabling message only when we actually need to enable WiFi
     GFX_setMode(MODE_MAIN);
     GFX_clear(screen);
     GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.15f, 1, 0);
@@ -817,39 +662,23 @@ bool ensureWifiEnabled(void) {
         SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){screen->w/2 - text_w/2, screen->h/2});
         SDL_FreeSurface(text);
     }
-    GFX_blitButtonGroup((char*[]){ "B","CANCEL", NULL }, 0, screen, 1);
     GFX_flip(screen);
 
-    // Enable WiFi
-    PLAT_wifiEnable(true);
-
-    // Wait for WiFi to be enabled (with timeout and cancel option)
-    uint32_t start_time = SDL_GetTicks();
-    uint32_t timeout_ms = 10000; // 10 second timeout
-
-    while (!PLAT_wifiEnabled()) {
-        GFX_startFrame();
-        PAD_poll();
-
-        if (PAD_justPressed(BTN_B)) {
-            GFX_setMode(MODE_MENU);
-            return false;
-        }
-
-        if (SDL_GetTicks() - start_time > timeout_ms) {
-            GFX_setMode(MODE_MENU);
-            Menu_message("Failed to enable WiFi.\nPlease try again.", (char*[]){ "A","OKAY", NULL });
-            return false;
-        }
-
-        SDL_Delay(100);
-    }
-
-    // Give WiFi a moment to stabilize
-    SDL_Delay(500);
+    // Use WIFI_direct to ensure WiFi is ready
+    bool ready = WIFI_direct_ensureReady();
 
     GFX_setMode(MODE_MENU);
+
+    if (!ready) {
+        Menu_message("Failed to enable WiFi.\nPlease try again.", (char*[]){ "A","OKAY", NULL });
+        return false;
+    }
+
     return true;
+#else
+    Menu_message("WiFi not available\non this platform.", (char*[]){ "A","OKAY", NULL });
+    return false;
+#endif
 }
 
 bool ensureNetworkConnected(LinkType type, const char* action) {
@@ -881,19 +710,17 @@ typedef struct {
 static void* hotspot_stop_thread(void* arg) {
     HotspotStopArgs* args = (HotspotStopArgs*)arg;
 
-    if (args->stop_hotspot) {
 #ifdef HAS_WIFIMG
+    if (args->stop_hotspot) {
         WIFI_direct_stopHotspot();
-#endif
     }
 
     // Forget hotspot SSID to prevent auto-reconnection (for client case)
     if (args->hotspot_ssid[0]) {
-        PLAT_wifiForget(args->hotspot_ssid, SECURITY_WPA2_PSK);
+        WIFI_direct_forget(args->hotspot_ssid);
     }
 
     // Restore previous WiFi connection
-#ifdef HAS_WIFIMG
     WIFI_direct_restorePreviousConnection();
 #endif
 
@@ -1901,6 +1728,11 @@ int hostGame_common(LinkType type, void* list, int i) {
 }
 
 int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
+#ifndef HAS_WIFIMG
+    Menu_message("WiFi not available\non this platform.", (char*[]){ "A","OKAY", NULL });
+    return MENU_CALLBACK_NOP;
+#endif
+
     // Show initial message
     GFX_setMode(MODE_MAIN);
     GFX_clear(screen);
@@ -1924,7 +1756,6 @@ int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
     };
     NET_generateHotspotSSID(ssid, sizeof(ssid), &hotspot_cfg);
 
-#ifdef HAS_WIFIMG
     const char* pass = WIFI_direct_getHotspotPassword();
 
     if (WIFI_direct_startHotspot(ssid, pass) != 0) {
@@ -1934,7 +1765,6 @@ int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
 
     // Get hotspot IP
     const char* hotspot_ip = WIFI_direct_getHotspotIP();
-#endif
 
     // Start host with hotspot IP
     int start_result = -1;
@@ -1950,9 +1780,7 @@ int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
     }
 
     if (start_result != 0) {
-#ifdef HAS_WIFIMG
         WIFI_direct_stopHotspot();
-#endif
         Menu_message("Failed to start host.\nCheck device capabilities.", (char*[]){ "A","OKAY", NULL });
         return MENU_CALLBACK_NOP;
     }
@@ -2485,9 +2313,7 @@ int joinGameWiFi_common(LinkType type) {
 }
 
 int joinGame_Hotspot_common(LinkType type) {
-    if (!ensureWifiEnabled()) {
-        return MENU_CALLBACK_NOP;
-    }
+    // Note: ensureWifiEnabled() already called by joinGame_common()
 
     // Link-type specific setup
     const char* display_name = "Netplay";
@@ -2524,10 +2350,8 @@ int joinGame_Hotspot_common(LinkType type) {
     char hotspots[8][33];
     memset(hotspots, 0, sizeof(hotspots));  // Zero-initialize to prevent garbage
 
-#ifdef HAS_WIFIMG
     // Use wifi_direct for more reliable scanning (bypasses wifi_daemon)
     int hotspot_count = WIFI_direct_scanForHotspots(LINK_HOTSPOT_SSID_PREFIX, hotspots, 8);
-#endif
 
     if (hotspot_count == 0) {
         char no_host_msg[128];
@@ -2629,25 +2453,25 @@ int joinGame_Hotspot_common(LinkType type) {
         hdmimon();
     }
 
-#ifdef HAS_WIFIMG
-    const char* hotspot_pass = WIFI_direct_getHotspotPassword();
-#endif
-
     // Connect to selected hotspot
     const char* selected_code = (strlen(selected_ssid) > prefix_len) ? selected_ssid + prefix_len : "????";
     char connect_msg[64];
     snprintf(connect_msg, sizeof(connect_msg), "Connecting to %s...", selected_code[0] ? selected_code : "????");
     showOverlayMessage(connect_msg);
 
-#ifdef HAS_WIFIMG
+    // Save current connection before switching to hotspot (so we can restore later)
+    WIFI_direct_saveCurrentConnection();
+
+    // Disconnect from current WiFi first to ensure clean switch to hotspot
+    WIFI_direct_disconnect();
+    SDL_Delay(500);  // Give wpa_supplicant time to fully disconnect
+
     // Use wifi_direct for more reliable connection (bypasses wifi_daemon)
+    const char* hotspot_pass = WIFI_direct_getHotspotPassword();
     int wifi_connect_result = WIFI_direct_connect(selected_ssid, hotspot_pass);
-#endif
 
     if (wifi_connect_result != 0) {
-#ifdef HAS_WIFIMG
         WIFI_direct_restorePreviousConnection();  // Restore WiFi so next scan works
-#endif
         Menu_message("Failed to connect to host.", (char*[]){ "A","OKAY", NULL });
         return MENU_CALLBACK_NOP;
     }
@@ -2665,9 +2489,7 @@ int joinGame_Hotspot_common(LinkType type) {
     }
 
     // On hotspot network, host is always at fixed IP
-#ifdef HAS_WIFIMG
     const char* host_ip = WIFI_direct_getHotspotIP();
-#endif
 
     // For GBALink, query host's link_mode directly BEFORE TCP connection
     // This allows showing the sync dialog without making a TCP connection
@@ -2687,18 +2509,14 @@ int joinGame_Hotspot_common(LinkType type) {
                     // User confirmed - apply mode, save config, disconnect from hotspot, reload
                     OptionList_setOptionValue(minarch_getCoreOptionList(), "gpsp_serial", host_mode);
                     minarch_saveConfig();
-#ifdef HAS_WIFIMG
                     WIFI_direct_restorePreviousConnection();
-#endif
                     *connected_to_hotspot_flag = 0;
                     minarch_reloadGame();  // Deferred to avoid segfault
                     gbalink_force_resume = 1;
                     return MENU_CALLBACK_EXIT;
                 } else {
                     // User cancelled - disconnect from hotspot
-#ifdef HAS_WIFIMG
                     WIFI_direct_restorePreviousConnection();
-#endif
                     *connected_to_hotspot_flag = 0;
                     return MENU_CALLBACK_NOP;
                 }
@@ -2724,9 +2542,7 @@ int joinGame_Hotspot_common(LinkType type) {
 
     if (connect_result == GBALINK_CONNECT_ERROR || (connect_result != 0 && connect_result != GBALINK_CONNECT_NEEDS_RELOAD)) {
         Menu_message("Failed to connect to host.\n\nConnection timed out.", (char*[]){ "A","OKAY", NULL });
-#ifdef HAS_WIFIMG
         WIFI_direct_restorePreviousConnection();
-#endif
         *connected_to_hotspot_flag = 0;
         return MENU_CALLBACK_NOP;
     }
@@ -2749,9 +2565,7 @@ int joinGame_Hotspot_common(LinkType type) {
             // User cancelled - clear state and disconnect
             GBALink_clearPendingReload();
             GBALink_disconnect();
-#ifdef HAS_WIFIMG
             WIFI_direct_restorePreviousConnection();
-#endif
             *connected_to_hotspot_flag = 0;
             return MENU_CALLBACK_NOP;
         }
@@ -2962,8 +2776,9 @@ int status_common(LinkType type) {
 
     // Get hotspot code if hosting with hotspot
     if (is_using_hotspot && mode_host) {
+        const char* ssid = NULL;
 #ifdef HAS_WIFIMG
-        const char* ssid = WIFI_direct_getHotspotSSID();
+        ssid = WIFI_direct_getHotspotSSID();
 #endif
         size_t ssid_len = ssid ? strlen(ssid) : 0;
         size_t prefix_len = strlen(LINK_HOTSPOT_SSID_PREFIX);

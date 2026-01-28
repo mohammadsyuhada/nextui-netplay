@@ -378,6 +378,42 @@ void WIFI_direct_disconnect(void)
     system(WPA_CLI_CMD " disconnect >/dev/null 2>&1");
 }
 
+void WIFI_direct_forget(const char* ssid)
+{
+    if (!ssid || !ssid[0]) {
+        return;
+    }
+
+    // Find network ID by SSID
+    FILE* fp = popen(WPA_CLI_CMD " list_networks 2>/dev/null", "r");
+    if (!fp) {
+        LOG_error("WIFI_direct_forget: failed to list networks\n");
+        return;
+    }
+
+    int network_id = -1;
+    char line[256];
+    while (fgets(line, sizeof(line), fp)) {
+        int id;
+        char net_ssid[128];
+        // Format: "network_id / ssid / bssid / flags"
+        if (sscanf(line, "%d\t%127[^\t]", &id, net_ssid) == 2) {
+            if (strcmp(net_ssid, ssid) == 0) {
+                network_id = id;
+                break;
+            }
+        }
+    }
+    pclose(fp);
+
+    if (network_id >= 0) {
+        char cmd[256];
+        snprintf(cmd, sizeof(cmd), WPA_CLI_CMD " remove_network %d >/dev/null 2>&1", network_id);
+        system(cmd);
+        system(WPA_CLI_CMD " save_config >/dev/null 2>&1");
+    }
+}
+
 int WIFI_direct_scanForHotspots(const char* prefix, char ssids_out[][WIFI_DIRECT_SSID_MAX], int max_count)
 {
     if (!prefix || !ssids_out || max_count <= 0) {
