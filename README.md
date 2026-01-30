@@ -54,27 +54,32 @@ True multiplayer for GameBoy Advance/Game Boy Color/Game Boy. Each player has th
 ### Prerequisites
 - NextUI already installed on your TrimUI Brick
 
-### Steps
+## Installation
 
-1. Eject your SD card and insert it into your computer
-2. Download `miniui.zip` from the [Releases](../../releases) page
-4. Copy both `miniui.zip` to the **root** of your SD card
-   - Overwrite existing files when prompted
-5. Safely eject the SD card and reinsert it into your device
-6. Power on your device—you'll see "NextUI is being updated"
-7. Wait for the update to complete (do **not** power off during this process)
-8. The device may turn off automatically when done
-9. Power on again and enjoy!
+### Manual Installation
+1. Mount your NextUI SD card to a computer.
+2. Download the latest release file named `Netplay.pak.zip` from Github.
+3. Copy the zip file to `/Tools/<PLATFORM>/Netplay.pak.zip` (replace `<PLATFORM>` with your device: `tg5040` or `tg5050`).
+4. Extract the zip in place, then delete the zip file.
+5. Confirm that there is a `/Tools/<PLATFORM>/Netplay.pak` folder on your SD card.
+6. Unmount your SD Card and insert it into your TrimUI device.
 
-### Reverting to Stock NextUI
+### Pak Store Installation
 
-Download `base.zip` from the [official NextUI releases](https://github.com/LoveRetro/NextUI/releases) and follow the same installation steps above.
+1. Open `Pak Store` application in your TrimUI device. 
+2. Navigate to the `Browse` then `System` menu. 
+3. Select `Netplay` to install.
+
+## Update
+
+1) You can update the application directly via `About` page in the application.
+2) Or, you can update via `Pak Store`.
 
 ## Usage
 
 ### Netplay (LAN)
 
-Refer the youtube video. 
+Refer the youtube video for the actual in-game steps to host/join a game. This Pak only enable/disable the feature. 
 
 [![nextui-netplay-youtube](https://github.com/user-attachments/assets/4a6872a4-5214-4ad9-b41a-d09d56aec7a1)](https://www.youtube.com/watch?v=-FXKdT8EJdE)
 

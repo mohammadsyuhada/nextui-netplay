@@ -1,0 +1,16 @@
+{
+  "name": "Netplay",
+  "version": "v1.0.0",
+  "type": "TOOL",
+  "description": "Enable/disable netplay for multiplayer gaming over WiFi.",
+  "author": "mohammadsyuhada",
+  "repo_url": "https://github.com/mohammadsyuhada/nextui-netplay",
+  "release_filename": "Netplay.pak.zip",
+  "changelog": {
+    "v1.0.0": "Initial stable release"
+  },
+  "platforms": [
+    "tg5040", 
+    "tg5050"
+  ]
+}

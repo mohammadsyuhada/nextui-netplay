@@ -1,3 +1,6 @@
 .DS_Store
 CLAUDE.md
 DEBUGGING.md
+
+state/installed_version.txt
+state/netplay.state
