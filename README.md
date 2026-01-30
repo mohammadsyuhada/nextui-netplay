@@ -107,7 +107,7 @@ cd NextUi
 # Built gambatte core
 make build-core PLATFORM=tg5040 CORE=gambatte && make build-core PLATFORM=tg5050 CORE=gambatte
 
-# Built gambatte core
+# Built gpsp core
 make build-core PLATFORM=tg5040 CORE=gpsp && make build-core PLATFORM=tg5050 CORE=gpsp
 
 # Built NextUI
