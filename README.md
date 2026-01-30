@@ -9,8 +9,6 @@ Drop-in patches and pre-built binaries to add LAN multiplayer and GBA Link suppo
 <img width="50%" alt="Pokemon - FireRed 2026-01-23-03-30-57" src="https://github.com/user-attachments/assets/54070772-8cd8-43ab-ba14-eba55abf62dc" />
 <img width="50%" alt="Pokemon - FireRed 2026-01-23-03-23-29" src="https://github.com/user-attachments/assets/f35be7df-92d1-418a-8961-13b155000f72" />
 
-
-
 ## Features
 
 ### Netplay (LAN)
@@ -32,7 +30,7 @@ True multiplayer for GameBoy Advance/Game Boy Color/Game Boy. Each player has th
 
 | | |
 |---|---|
-| **NextUI Version** | v6.7.2 ([Release](https://github.com/LoveRetro/NextUI/releases/tag/v6.7.2)) |
+| **NextUI Version** | v6.7.3 ([Release](https://github.com/LoveRetro/NextUI/releases/tag/v6.7.3)) |
 | **Tested Devices** | TrimUI Brick, TrimUI Brick Hammer |
 
 ## Supported Platforms
@@ -92,6 +90,27 @@ Refer the youtube video.
 ## Disclaimer
 
 This is an unofficial modification. Use at your own risk. Always backup your SD card before installing.
+
+## Developer Note
+
+- Copy and replace all files in the `workspace` folder to the NextUi `workspace` folder. 
+- Rebuild `gpsp` and `gambatte` core for all plaform. 
+```
+# Navigate to the NextUI source code folder
+cd NextUi
+
+# Built gambatte core
+make build-core PLATFORM=tg5040 CORE=gambatte && make build-core PLATFORM=tg5050 CORE=gambatte
+
+# Built gambatte core
+make build-core PLATFORM=tg5040 CORE=gpsp && make build-core PLATFORM=tg5050 CORE=gpsp
+
+# Built NextUI
+make all
+```
+- Final file will be at `build/BASE/MinUI.zip`.
+- Use `adb push ./build/BASE/MinUI.zip /mnt/SDCARD && adb shell reboot` to push update to your connected device. 
+- Or you can run `make deploy` instead of `make all` to automatically deploy the file to your connected device
 
 ## Credits
 
