@@ -23,8 +23,10 @@ MINARCH_PATH = $(WORKSPACE_PATH)/all/minarch
 
 # Include paths
 INCDIR = -I. -I$(COMMON_PATH) -I$(PLATFORM_PATH)/platform -I$(MINARCH_PATH)/libretro-common/include
+INCDIR += -I./include
 
 SOURCE = netplay.c netplay_config.c fileops.c ui.c selfupdate.c \
+         include/parson/parson.c \
          $(COMMON_PATH)/utils.c $(COMMON_PATH)/api.c $(COMMON_PATH)/config.c $(COMMON_PATH)/scaler.c \
          $(PLATFORM_PATH)/platform/platform.c
 

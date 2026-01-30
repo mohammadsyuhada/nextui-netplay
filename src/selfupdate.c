@@ -10,6 +10,8 @@
 #include <errno.h>
 #include <zip.h>
 
+#include "include/parson/parson.h"
+
 // Paths
 static char pak_path[512] = "";
 static char wget_path[512] = "";
@@ -384,6 +386,21 @@ static void* check_thread_func(void* arg) {
 
     strncpy(update_status.download_url, download_url, sizeof(update_status.download_url));
 
+    // Parse release notes (body) from JSON using parson
+    // This properly handles all JSON escape sequences
+    JSON_Value* json_root = json_parse_file(latest_file);
+    if (json_root) {
+        JSON_Object* json_obj = json_value_get_object(json_root);
+        if (json_obj) {
+            const char* body = json_object_get_string(json_obj, "body");
+            if (body) {
+                strncpy(update_status.release_notes, body, sizeof(update_status.release_notes) - 1);
+                update_status.release_notes[sizeof(update_status.release_notes) - 1] = '\0';
+            }
+        }
+        json_value_free(json_root);
+    }
+
     snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", temp_dir);
     system(cmd);
 
@@ -536,7 +553,7 @@ static void* update_thread_func(void* arg) {
     system(cmd);
 
     update_status.progress_percent = 100;
-    strcpy(update_status.status_message, "Update complete! Restart to apply.");
+    strcpy(update_status.status_message, "Update complete!");
     update_status.state = SELFUPDATE_STATE_COMPLETED;
     update_running = false;
 

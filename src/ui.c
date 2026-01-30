@@ -336,7 +336,7 @@ void UI_renderUpdateProgress(SDL_Surface* screen, int show_setting) {
     const SelfUpdateStatus* status = SelfUpdate_getStatus();
     SelfUpdateState state = status->state;
 
-    // Version info
+    // Version info: "v0.1.0 → v0.2.0"
     char ver_str[128];
     if (strlen(status->latest_version) > 0) {
         snprintf(ver_str, sizeof(ver_str), "%s  ->  %s", status->current_version, status->latest_version);
@@ -351,13 +351,89 @@ void UI_renderUpdateProgress(SDL_Surface* screen, int show_setting) {
         SDL_FreeSurface(ver_text);
     }
 
-    // Progress bar (during active update)
+    // Release notes area with word wrapping (positioned right below version info)
+    int notes_y = ver_y + SCALE1(30);
+    int notes_max_lines = 5;
+    int line_height = SCALE1(18);
+    int max_line_width = hw - SCALE1(PADDING * 6);
+
+    if (strlen(status->release_notes) > 0 && state != SELFUPDATE_STATE_CHECKING) {
+        // Word-wrap release notes
+        char notes_copy[1024];
+        strncpy(notes_copy, status->release_notes, sizeof(notes_copy) - 1);
+        notes_copy[sizeof(notes_copy) - 1] = '\0';
+
+        // Replace newlines with spaces for continuous wrapping
+        for (int i = 0; notes_copy[i]; i++) {
+            if (notes_copy[i] == '\n' || notes_copy[i] == '\r') notes_copy[i] = ' ';
+        }
+
+        char wrapped_lines[5][128];
+        int line_count = 0;
+        char* src = notes_copy;
+
+        while (*src && line_count < notes_max_lines) {
+            // Skip leading spaces
+            while (*src == ' ') src++;
+            if (!*src) break;
+
+            // Find how many characters fit in max_line_width
+            char test_line[128] = "";
+            int char_count = 0;
+            int last_space = -1;
+
+            while (src[char_count] && char_count < 127) {
+                test_line[char_count] = src[char_count];
+                test_line[char_count + 1] = '\0';
+
+                if (src[char_count] == ' ') last_space = char_count;
+
+                // Check width
+                int text_w, text_h;
+                TTF_SizeUTF8(font.small, test_line, &text_w, &text_h);
+                if (text_w > max_line_width) {
+                    // Line too long, break at last space or current position
+                    if (last_space > 0) {
+                        char_count = last_space;
+                    }
+                    break;
+                }
+                char_count++;
+            }
+
+            // Copy the line
+            strncpy(wrapped_lines[line_count], src, char_count);
+            wrapped_lines[line_count][char_count] = '\0';
+            src += char_count;
+            line_count++;
+        }
+
+        // Render wrapped lines
+        for (int i = 0; i < line_count; i++) {
+            if (strlen(wrapped_lines[i]) > 0) {
+                SDL_Surface* line_text = TTF_RenderUTF8_Blended(font.small, wrapped_lines[i], COLOR_WHITE);
+                if (line_text) {
+                    SDL_BlitSurface(line_text, NULL, screen, &(SDL_Rect){(hw - line_text->w) / 2, notes_y + i * line_height});
+                    SDL_FreeSurface(line_text);
+                }
+            }
+        }
+    } else if (state == SELFUPDATE_STATE_CHECKING) {
+        // Show checking message
+        SDL_Surface* check_text = TTF_RenderUTF8_Blended(font.small, "Checking for updates...", COLOR_GRAY);
+        if (check_text) {
+            SDL_BlitSurface(check_text, NULL, screen, &(SDL_Rect){(hw - check_text->w) / 2, notes_y});
+            SDL_FreeSurface(check_text);
+        }
+    }
+
+    // Progress bar (only during active update) - positioned above status message
     if (state == SELFUPDATE_STATE_DOWNLOADING || state == SELFUPDATE_STATE_EXTRACTING ||
         state == SELFUPDATE_STATE_APPLYING) {
         int bar_w = hw - SCALE1(PADDING * 8);
         int bar_h = SCALE1(8);
         int bar_x = SCALE1(PADDING * 4);
-        int bar_y = hh / 2;
+        int bar_y = hh - SCALE1(PILL_SIZE + PADDING * 9);
 
         // Background
         SDL_Rect bg_rect = {bar_x, bar_y, bar_w, bar_h};
@@ -369,30 +445,33 @@ void UI_renderUpdateProgress(SDL_Surface* screen, int show_setting) {
         SDL_FillRect(screen, &prog_rect, SDL_MapRGB(screen->format, 255, 255, 255));
     }
 
-    // Status message
-    const char* status_msg = status->status_message;
-    if (state == SELFUPDATE_STATE_ERROR && strlen(status->error_message) > 0) {
-        status_msg = status->error_message;
-    }
+    // Status message during active operations - positioned below progress bar
+    if (state == SELFUPDATE_STATE_DOWNLOADING || state == SELFUPDATE_STATE_EXTRACTING ||
+        state == SELFUPDATE_STATE_APPLYING || state == SELFUPDATE_STATE_COMPLETED ||
+        state == SELFUPDATE_STATE_ERROR) {
 
-    SDL_Color status_color = COLOR_WHITE;
-    if (state == SELFUPDATE_STATE_ERROR) {
-        status_color = (SDL_Color){255, 100, 100, 255};
-    } else if (state == SELFUPDATE_STATE_COMPLETED) {
-        status_color = (SDL_Color){100, 255, 100, 255};
-    }
+        const char* status_msg = status->status_message;
+        if (state == SELFUPDATE_STATE_ERROR && strlen(status->error_message) > 0) {
+            status_msg = status->error_message;
+        }
 
-    if (strlen(status_msg) > 0) {
+        SDL_Color status_color = COLOR_WHITE;
+        if (state == SELFUPDATE_STATE_ERROR) {
+            status_color = (SDL_Color){255, 100, 100, 255};
+        } else if (state == SELFUPDATE_STATE_COMPLETED) {
+            status_color = (SDL_Color){100, 255, 100, 255};
+        }
+
         SDL_Surface* status_text = TTF_RenderUTF8_Blended(font.small, status_msg, status_color);
         if (status_text) {
-            SDL_BlitSurface(status_text, NULL, screen, &(SDL_Rect){(hw - status_text->w) / 2, hh / 2 + SCALE1(30)});
+            SDL_BlitSurface(status_text, NULL, screen, &(SDL_Rect){(hw - status_text->w) / 2, hh - SCALE1(PILL_SIZE + PADDING * 5)});
             SDL_FreeSurface(status_text);
         }
     }
 
     // Button hints
     if (state == SELFUPDATE_STATE_COMPLETED) {
-        GFX_blitButtonGroup((char*[]){"A", "RESTART", NULL}, 1, screen, 1);
+        GFX_blitButtonGroup((char*[]){"A", "CLOSE", NULL}, 1, screen, 1);
     } else if (state == SELFUPDATE_STATE_DOWNLOADING) {
         GFX_blitButtonGroup((char*[]){"B", "CANCEL", NULL}, 1, screen, 1);
     } else {

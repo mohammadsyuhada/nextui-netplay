@@ -150,6 +150,9 @@ static void do_disable_netplay(void) {
 // Track if update check was running
 static bool update_check_was_running = false;
 
+// Track if autosleep is disabled (during update)
+static bool autosleep_disabled = false;
+
 // Handle menu state input
 static void handle_menu_input(int* dirty) {
     // Check if update check just completed (to update menu label)
@@ -244,16 +247,19 @@ static void handle_about_input(int* dirty) {
 
 // Handle update progress screen input
 static void handle_updating_input(int* dirty) {
+    // Disable autosleep during update to prevent screen turning off
+    if (!autosleep_disabled) {
+        PWR_disableAutosleep();
+        autosleep_disabled = true;
+    }
+
     const SelfUpdateStatus* status = SelfUpdate_getStatus();
     SelfUpdateState state = status->state;
 
     if (PAD_justPressed(BTN_A)) {
         if (state == SELFUPDATE_STATE_COMPLETED) {
-            // Restart the app
-            char launch_path[600];
-            snprintf(launch_path, sizeof(launch_path), "%s/launch.sh", pak_path);
-            execl("/bin/sh", "sh", launch_path, NULL);
-            quit = true;  // If exec fails
+            // Close the app - user will relaunch manually
+            quit = true;
         }
     }
     else if (PAD_justPressed(BTN_B)) {
@@ -262,16 +268,18 @@ static void handle_updating_input(int* dirty) {
         }
         if (state == SELFUPDATE_STATE_IDLE || state == SELFUPDATE_STATE_ERROR ||
             state == SELFUPDATE_STATE_COMPLETED) {
+            // Re-enable autosleep when leaving update screen
+            if (autosleep_disabled) {
+                PWR_enableAutosleep();
+                autosleep_disabled = false;
+            }
             app_state = STATE_ABOUT;
             *dirty = 1;
         }
     }
 
-    // Always redraw during update to show progress
-    if (state == SELFUPDATE_STATE_DOWNLOADING || state == SELFUPDATE_STATE_EXTRACTING ||
-        state == SELFUPDATE_STATE_APPLYING || state == SELFUPDATE_STATE_CHECKING) {
-        *dirty = 1;
-    }
+    // Always redraw while on update screen to show progress and state changes
+    *dirty = 1;
 }
 
 int main(int argc, char* argv[]) {
@@ -415,6 +423,12 @@ int main(int argc, char* argv[]) {
         } else {
             GFX_sync();
         }
+    }
+
+    // Re-enable autosleep if it was disabled
+    if (autosleep_disabled) {
+        PWR_enableAutosleep();
+        autosleep_disabled = false;
     }
 
     // Cleanup
