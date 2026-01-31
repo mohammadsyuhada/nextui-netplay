@@ -1,10 +1,25 @@
 ###########################################################
-# Netplay Tool - Single binary build
-# Uses tg5040 platform (handles both Brick and Smart Pro at runtime)
+# Netplay Tool - Multi-platform build
+# Supported platforms: tg5040, tg5050
 ###########################################################
 
-# Build platform (tg5040 handles runtime detection via is_brick)
-PLATFORM = tg5040
+# Supported platforms
+SUPPORTED_PLATFORMS = tg5040 tg5050
+DEFAULT_PLATFORM = tg5040
+
+# Set platform from environment or default
+ifeq (,$(PLATFORM))
+PLATFORM=$(UNION_PLATFORM)
+endif
+
+ifeq (,$(PLATFORM))
+PLATFORM=$(DEFAULT_PLATFORM)
+endif
+
+# Validate platform
+ifeq (,$(filter $(PLATFORM),$(SUPPORTED_PLATFORMS)))
+$(error Invalid PLATFORM '$(PLATFORM)'. Supported: $(SUPPORTED_PLATFORMS))
+endif
 
 # Validate cross-compiler
 ifeq (,$(CROSS_COMPILE))
@@ -48,12 +63,12 @@ MY_LDFLAGS += $(shell pkg-config --libs sdl2 glesv2 2>/dev/null || echo "-lSDL2 
 MY_LDFLAGS += -lSDL2_image -lSDL2_ttf
 MY_LDFLAGS += -lmsettings -lsamplerate -lzip -lm -ldl -lpthread
 
-# Output binary (single binary for all platforms)
-PRODUCT = ../bin/$(TARGET).elf
+# Output binary (platform-specific)
+PRODUCT = ../bin/$(PLATFORM)/$(TARGET).elf
 
 all:
-	@mkdir -p ../bin
+	@mkdir -p ../bin/$(PLATFORM)
 	$(CC) $(SOURCE) -o $(PRODUCT) $(MY_CFLAGS) $(MY_LDFLAGS)
 
 clean:
-	rm -f ../bin/$(TARGET).elf
+	rm -f ../bin/tg5040/$(TARGET).elf ../bin/tg5050/$(TARGET).elf
