@@ -1921,6 +1921,9 @@ int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
 }
 
 int hostGameWiFi_common(LinkType type, const char* game_name, uint32_t crc) {
+    // Ensure wlan1 is down in case device previously hosted via hotspot
+    system("ip link set wlan1 down 2>/dev/null");
+
     // Check for network connectivity (required for WiFi mode)
     if (!ensureNetworkConnected(type, "hosting")) {
         return MENU_CALLBACK_NOP;
@@ -2078,6 +2081,9 @@ int hostGameWiFi_common(LinkType type, const char* game_name, uint32_t crc) {
 }
 
 int joinGameWiFi_common(LinkType type) {
+    // Ensure wlan1 is down in case device previously hosted via hotspot
+    system("ip link set wlan1 down 2>/dev/null");
+
     // Check for network connectivity (required for WiFi mode)
     if (!ensureNetworkConnected(type, "joining")) {
         return MENU_CALLBACK_NOP;
@@ -2454,9 +2460,20 @@ int joinGame_Hotspot_common(LinkType type) {
     // Save current connection before switching to hotspot (so we can restore later)
     WIFI_direct_saveCurrentConnection();
 
+    // IMPORTANT: Ensure wlan1 is completely down before joining another hotspot
+    // This fixes an issue where a device that previously hosted still has wlan1
+    // up with 10.0.0.1, causing routing conflicts when trying to join a new hotspot
+    system("killall hostapd 2>/dev/null");
+    system("killall udhcpd 2>/dev/null");
+    system("ip addr flush dev wlan1 2>/dev/null");
+    system("ip link set wlan1 down 2>/dev/null");
+
     // Disconnect from current WiFi first to ensure clean switch to hotspot
     WIFI_direct_disconnect();
-    SDL_Delay(500);  // Give wpa_supplicant time to fully disconnect
+    // Flush any stale network state (old routes, IP addresses)
+    system("ip addr flush dev wlan0 2>/dev/null");
+    system("ip route flush dev wlan0 2>/dev/null");
+    SDL_Delay(1000);  // Wait for cleanup to complete
 
     // Use wifi_direct for more reliable connection (bypasses wifi_daemon)
     const char* hotspot_pass = WIFI_direct_getHotspotPassword();
@@ -2516,20 +2533,70 @@ int joinGame_Hotspot_common(LinkType type) {
         }
     }
 
+    // Verify client has valid IP before attempting TCP connect
+    char client_ip[16] = {0};
+    WIFI_direct_getIP(client_ip, sizeof(client_ip));
+    if (client_ip[0] == '\0' || strcmp(client_ip, "0.0.0.0") == 0) {
+        showOverlayMessage("Waiting for network...");
+        // Wait up to 10 seconds for DHCP to assign IP
+        for (int i = 0; i < 20; i++) {
+            SDL_Delay(500);
+            WIFI_direct_getIP(client_ip, sizeof(client_ip));
+            if (client_ip[0] != '\0' && strcmp(client_ip, "0.0.0.0") != 0) {
+                break;
+            }
+        }
+        if (client_ip[0] == '\0' || strcmp(client_ip, "0.0.0.0") == 0) {
+            minarch_menuMessage("Failed to get IP address.\n\nPlease try again.",
+                               (char*[]){ "A","OKAY", NULL });
+            WIFI_direct_restorePreviousConnection();
+            *connected_to_hotspot_flag = 0;
+            return MENU_CALLBACK_NOP;
+        }
+    }
+
     showOverlayMessage("Establishing link...");
 
-    // Connect to host (modes already match for GBALink if we got here)
+    // Network warmup: ping host to populate ARP cache and verify connectivity
+    // This helps with intermittent connection failures on hotspot
+    {
+        char ping_cmd[64];
+        snprintf(ping_cmd, sizeof(ping_cmd), "ping -c 1 -W 2 %s >/dev/null 2>&1", host_ip);
+        int ping_result = system(ping_cmd);
+        if (ping_result != 0) {
+            // First ping failed, wait and retry - ARP may need time
+            SDL_Delay(500);
+            system(ping_cmd);
+        }
+        // Even if ping fails, still try TCP - the ping may be blocked but TCP allowed
+    }
+
+    // Connect to host with retry logic (modes already match for GBALink if we got here)
     int connect_result = -1;
-    switch (type) {
-        case LINK_TYPE_NETPLAY:
-            connect_result = Netplay_connectToHost(host_ip, default_port);
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+            char retry_msg[64];
+            snprintf(retry_msg, sizeof(retry_msg), "Retrying connection... (%d/3)", attempt + 1);
+            showOverlayMessage(retry_msg);
+            SDL_Delay(1500);  // Increased delay before retry for network stabilization
+        }
+
+        switch (type) {
+            case LINK_TYPE_NETPLAY:
+                connect_result = Netplay_connectToHost(host_ip, default_port);
+                break;
+            case LINK_TYPE_GBALINK:
+                connect_result = GBALink_connectToHost(host_ip, default_port);
+                break;
+            case LINK_TYPE_GBLINK:
+                connect_result = GBLink_connectToHost(host_ip, default_port);
+                break;
+        }
+
+        // Success or needs reload - stop retrying
+        if (connect_result == 0 || connect_result == GBALINK_CONNECT_NEEDS_RELOAD) {
             break;
-        case LINK_TYPE_GBALINK:
-            connect_result = GBALink_connectToHost(host_ip, default_port);
-            break;
-        case LINK_TYPE_GBLINK:
-            connect_result = GBLink_connectToHost(host_ip, default_port);
-            break;
+        }
     }
 
     if (connect_result == GBALINK_CONNECT_ERROR || (connect_result != 0 && connect_result != GBALINK_CONNECT_NEEDS_RELOAD)) {

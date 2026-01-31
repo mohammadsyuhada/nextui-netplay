@@ -355,9 +355,24 @@ int WIFI_direct_connect(const char* ssid, const char* pass)
         elapsed += WIFI_CONNECT_CHECK_INTERVAL_MS;
 
         if (WIFI_direct_isConnected()) {
-            // Request DHCP
-            system("udhcpc -i wlan0 -q -n >/dev/null 2>&1 &");
-            wifi_sleep_ms(2000);  // Give DHCP time to get an IP
+            // Request DHCP with retries (-t 5 = 5 retries instead of -n = no retry)
+            system("udhcpc -i wlan0 -q -t 5 >/dev/null 2>&1 &");
+
+            // Poll for valid IP instead of fixed delay (up to 10 seconds)
+            char ip[16] = {0};
+            bool got_ip = false;
+            for (int i = 0; i < 20; i++) {  // 20 * 500ms = 10 seconds max
+                wifi_sleep_ms(500);
+                if (WIFI_direct_getIP(ip, sizeof(ip)) == 0 &&
+                    ip[0] != '\0' && strcmp(ip, "0.0.0.0") != 0) {
+                    got_ip = true;
+                    break;
+                }
+            }
+
+            if (!got_ip) {
+                LOG_error("WIFI_direct_connect: DHCP timeout - no IP assigned\n");
+            }
 
             return 0;
         }
@@ -585,6 +600,10 @@ int WIFI_direct_startHotspot(const char* ssid, const char* password) {
         WIFI_direct_disconnect();
         wifi_sleep_ms(300);
     }
+    // IMPORTANT: Flush wlan0 IP to avoid conflict with hotspot subnet (10.0.0.x)
+    // If wlan0 had an IP like 10.0.0.10 from a previous client session, it will
+    // conflict with the DHCP range of the hotspot we're about to start
+    system("ip addr flush dev wlan0 2>/dev/null");
     system("ip link set wlan0 down 2>/dev/null");
     wifi_sleep_ms(200);
 
