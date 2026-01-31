@@ -36,8 +36,7 @@
 
 ///////////////////////////////////////
 
-SDL_Surface* screen;
-
+static SDL_Surface* screen;
 static int quit = 0;
 static int newScreenshot = 0;
 static int show_menu = 0;
@@ -74,23 +73,12 @@ static int has_custom_controllers = 0;
 static int gamepad_type = 0; // index in gamepad_labels/gamepad_values
 
 // these are no longer constants as of the RG CubeXX (even though they look like it)
-int DEVICE_WIDTH = 0;
-int DEVICE_HEIGHT = 0;
-int DEVICE_PITCH = 0;
+static int DEVICE_WIDTH = 0;
+static int DEVICE_HEIGHT = 0;
+static int DEVICE_PITCH = 0;
 static int shader_reset_suppressed = 0;
 
 GFX_Renderer renderer;
-
-// Accessor function for external modules
-SDL_Surface* minarch_getScreen(void) {
-	return screen;
-}
-int minarch_getDeviceWidth(void) {
-	return DEVICE_WIDTH;
-}
-int minarch_getDeviceHeight(void) {
-	return DEVICE_HEIGHT;
-}
 
 ///////////////////////////////////////
 
@@ -139,14 +127,9 @@ static struct Core {
 	retro_core_options_update_display_callback_t update_visibility_callback;
 	// retro_audio_buffer_status_callback_t audio_buffer_status;
 
-	// Netpacket interface (for GBA Link support)
-	bool has_netpacket;
-
-	// Whether to show netplay menu (false for cores that don't support it like mGBA)
-	bool show_netplay;
-
-	// GB Link support (gambatte core)
-	bool has_gblink;
+	bool has_netpacket; // Netpacket interface (for GBA Link support)
+	bool show_netplay; // Whether to show netplay menu (false for cores that don't support it like mGBA)
+	bool has_gblink; // GB Link support (gambatte core)
 } core;
 
 int extract_zip(char** extensions);
@@ -163,13 +146,6 @@ static struct Game {
 	size_t size;
 	int is_open;
 } game;
-
-// Accessor functions for netplay_helper.c
-const char* minarch_getCoreTag(void) { return core.tag; }
-const char* minarch_getGameName(void) { return game.name; }
-void* minarch_getGameData(void) { return game.data; }
-size_t minarch_getGameSize(void) { return game.size; }
-
 static void Game_open(char* path) {
 	LOG_info("Game_open\n");
 	int skipzip = 0;
@@ -2243,6 +2219,7 @@ char** list_files_in_folder(const char* folderPath, int* fileCount, const char* 
     return fileList;
 }
 
+static void OptionList_setOptionValue(OptionList* list, const char* key, const char* value);
 enum {
 	CONFIG_WRITE_ALL,
 	CONFIG_WRITE_GAME,
@@ -3151,7 +3128,7 @@ static Option* OptionList_getOption(OptionList* list, const char* key) {
 	}
 	return NULL;
 }
-char* OptionList_getOptionValue(OptionList* list, const char* key) {
+static char* OptionList_getOptionValue(OptionList* list, const char* key) {
 	Option* item = OptionList_getOption(list, key);
 	// if (item) LOG_info("\tGET %s (%s) = %s (%s)\n", item->name, item->key, item->labels[item->value], item->values[item->value]);
 	if (item) {
@@ -3176,29 +3153,13 @@ static void OptionList_setOptionRawValue(OptionList* list, const char* key, int 
 	}
 	else LOG_info("unknown option %s \n", key);
 }
-// Batch mode support for deferring config.core.changed flag
-// Used by gblink.c to set multiple core options atomically
-static int option_batch_mode = 0;
-static int option_batch_changed = 0;
 
-// Flag to skip video output during forced core.run() calls (e.g., for link option processing)
-// Declared here (before minarch_forceCoreOptionUpdate) but used in video_refresh_callback below
-static int skip_video_output = 0;
+static void core_log_callback(int level, const char* fmt, ...);
+static int option_batch_mode = 0; // Batch mode support for deferring config.core.changed flag
+static int option_batch_changed = 0; // Used by gblink.c to set multiple core options atomically
+static int skip_video_output = 0; // Flag to skip video output during forced core.run() calls (e.g., for link option processing)
 
-void OptionList_beginBatch(void) {
-	option_batch_mode = 1;
-	option_batch_changed = 0;
-}
-
-void OptionList_endBatch(OptionList* list) {
-	option_batch_mode = 0;
-	if (option_batch_changed) {
-		list->changed = 1;
-		option_batch_changed = 0;
-	}
-}
-
-void OptionList_setOptionValue(OptionList* list, const char* key, const char* value) {
+static void OptionList_setOptionValue(OptionList* list, const char* key, const char* value) {
 	Option* item = OptionList_getOption(list, key);
 	if (item) {
 		Option_setValue(item, value);
@@ -3220,48 +3181,10 @@ static void OptionList_setOptionVisibility(OptionList* list, const char* key, in
 	else printf("unknown option %s \n", key); fflush(stdout);
 }
 
-// Accessor function for core option list (used by gblink.c and netplay_helper.c)
-OptionList* minarch_getCoreOptionList(void) {
-	return &config.core;
-}
-
-// Wrapper to end batch mode for config.core (used by gblink.c)
-void OptionList_endBatchCore(void) {
-	OptionList_endBatch(&config.core);
-}
-
-// Force core to process option changes immediately (used by gblink.c and netplay_helper.c)
-// Runs one frame with video output suppressed to trigger check_variables()
-void minarch_forceCoreOptionUpdate(void) {
-	skip_video_output = 1;
-	core.run();
-	skip_video_output = 0;
-}
-
-// Save current config to file (used before core reset to preserve option changes)
-void minarch_saveConfig(void) {
-	Config_write(CONFIG_WRITE_ALL);
-}
-
-// Wrapper for libretro log callback to intercept core messages
-static void core_log_callback(int level, const char* fmt, ...) {
-	char buffer[512];
-	va_list args;
-	va_start(args, fmt);
-	vsnprintf(buffer, sizeof(buffer), fmt, args);
-	va_end(args);
-
-	// Forward to normal log
-	LOG_note(level, "%s", buffer);
-
-	// Let GBLink process the message for connection state tracking
-	GBLink_processLogMessage(buffer);
-}
-
 ///////////////////////////////
 
-void Menu_beforeSleep();
-void Menu_afterSleep();
+static void Menu_beforeSleep();
+static void Menu_afterSleep();
 
 static void Menu_screenshot(void);
 
@@ -3291,7 +3214,7 @@ static void input_poll_callback(void) {
 	if (PAD_isPressed(BTN_MENU) && PAD_isPressed(BTN_SELECT)) {
 		ignore_menu = 1;
 		newScreenshot = 1;
-		Link_quitAll();
+		Netplay_quitAll();
 		quit = 1;
 		Menu_saveState();
 		putFile(GAME_SWITCHER_PERSIST_PATH, game.path + strlen(SDCARD_PATH));
@@ -3363,13 +3286,13 @@ static void input_poll_callback(void) {
 						break;
 					case SHORTCUT_RESET_GAME: core.reset(); break;
 					case SHORTCUT_SAVE_QUIT:
-						Link_quitAll();
+						Netplay_quitAll();
 						newScreenshot = 1;
 						quit = 1;
 						Menu_saveState();
 						break;
 					case SHORTCUT_GAMESWITCHER:
-						Link_quitAll();
+						Netplay_quitAll();
 						newScreenshot = 1;
 						quit = 1;
 						Menu_saveState();
@@ -3869,7 +3792,7 @@ static bool environment_callback(unsigned cmd, void *data) { // copied from pico
 
 		return true;
 	}
-	case RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE: { /* 78 */
+	case RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE: {
 		const struct retro_netpacket_callback *cb =
 			(const struct retro_netpacket_callback *)data;
 		if (cb) {
@@ -3887,7 +3810,7 @@ static bool environment_callback(unsigned cmd, void *data) { // copied from pico
 
 ///////////////////////////////
 
-void hdmimon(void) {
+static void hdmimon(void) {
 	// handle HDMI change
 	static int had_hdmi = -1;
 	int has_hdmi = GetHDMI();
@@ -5129,17 +5052,10 @@ void Core_load(void) {
 	LOG_info("game path: %s (%i)\n", game_info.path, game.size);
 	core.load_game(&game_info);
 
-	if (Netplay_checkCoreSupport((char*)core.name)) {
-		core.show_netplay = true;
-	}
-	if (GBALink_checkCoreSupport((char*)core.name)) {
-		core.has_netpacket = true;
-		core.show_netplay = true;
-	}
-	if (GBLink_checkCoreSupport((char*)core.name)) {
-		core.has_gblink = true;
-		core.show_netplay = true;
-	}
+	CoreLinkSupport link_support = checkCoreLinkSupport(core.name);
+	core.show_netplay = link_support.show_netplay;
+	core.has_netpacket = link_support.has_netpacket;
+	core.has_gblink = link_support.has_gblink;
 
 	if (Cheats_load())
 		Core_applyCheats(&cheatcodes);
@@ -5171,22 +5087,6 @@ void Core_quit(void) {
 }
 void Core_close(void) {
 	if (core.handle) dlclose(core.handle);
-}
-
-// Reload the game to reinitialize core state (e.g., for gpSP serial mode changes)
-// Unloads and reloads the ROM so the core re-reads options during load_game()
-void minarch_reloadGame(void) {
-	SRAM_write();
-	core.unload_game();
-
-	struct retro_game_info game_info;
-	game_info.path = game.tmp_path[0] ? game.tmp_path : game.path;
-	game_info.data = game.data;
-	game_info.size = game.size;
-	core.load_game(&game_info);
-
-	SRAM_read();
-	Core_updateAVInfo();
 }
 
 ///////////////////////////////////////
@@ -5245,11 +5145,6 @@ struct {
 		[ITEM_QUIT] = "Quit",
 	}
 };
-
-// Accessor functions for netplay_helper.c
-SDL_Surface* minarch_getMenuBitmap(void) {
-	return menu.bitmap;
-}
 
 void Menu_init(void) {
 	menu.overlay = SDL_CreateRGBSurfaceWithFormat(SDL_SWSURFACE,
@@ -5376,7 +5271,7 @@ static int Menu_messageWithFont(char* message, char** pairs, TTF_Font* f) {
 	return MENU_CALLBACK_NOP; // TODO: this should probably be an arg
 }
 
-int Menu_message(char* message, char** pairs) {
+static int Menu_message(char* message, char** pairs) {
 	return Menu_messageWithFont(message, pairs, font.medium);
 }
 
@@ -6569,7 +6464,7 @@ static int Menu_options(MenuList* list) {
 	
 	// GFX_clearAll();
 	// GFX_flip(screen);
-
+	
 	return should_exit ? MENU_CALLBACK_EXIT : 0;
 }
 
@@ -6799,9 +6694,7 @@ static void Menu_screenshot(void) {
 }
 static void Menu_saveState(void) {
 	// Block save states during multiplayer - causes connection breaks
-	if (GBALink_isConnected() || GBLink_isConnected() || Netplay_isConnected()) {
-		return;
-	}
+	if (Multiplayer_isActive()) { return;}
 
 	// LOG_info("Menu_saveState\n");
 	Menu_updateState();
@@ -6835,9 +6728,7 @@ static void Menu_saveState(void) {
 }
 static void Menu_loadState(void) {
 	// Block load states during multiplayer - causes connection breaks
-	if (GBALink_isConnected() || GBLink_isConnected() || Netplay_isConnected()) {
-		return;
-	}
+	if (Multiplayer_isActive()) { return; }
 
 	Menu_updateState();
 	
@@ -6939,13 +6830,10 @@ static void Menu_loop(void) {
 
 		PAD_poll();
 
-		// Keep netplay connection alive while in menu
 		if (Netplay_isConnected()) {
 			Netplay_pollWhilePaused();
 		}
-
-		// Check if multiplayer is active (to skip Save/Load items)
-		int mp_active = GBALink_isConnected() || GBLink_isConnected() || Netplay_isConnected();
+		int mp_active = Multiplayer_isActive();
 		if (PAD_justPressed(BTN_UP)) {
 			do {
 				selected -= 1;
@@ -7063,7 +6951,7 @@ static void Menu_loop(void) {
 				}
 				break;
 				case ITEM_QUIT:
-					Link_quitAll();
+					Netplay_quitAll();
 					status = STATUS_QUIT;
 					show_menu = 0;
 					quit = 1; // TODO: tmp?
@@ -7112,10 +7000,10 @@ static void Menu_loop(void) {
 			
 			// list
 			// Hide Save/Load during multiplayer to prevent connection breaks
-			int multiplayer_active = GBALink_isConnected() || GBLink_isConnected() || Netplay_isConnected();
+			int multiplayer_active = Multiplayer_isActive();
 			int visible_item_count = MENU_ITEM_COUNT;
 			if (!core.show_netplay) visible_item_count--;
-			if (multiplayer_active) visible_item_count -= 2;  // Hide Save and Load
+			if (multiplayer_active) visible_item_count -= 2;
 			oy = (((DEVICE_HEIGHT / FIXED_SCALE) - PADDING * 2) - (visible_item_count * PILL_SIZE)) / 2;
 			int render_idx = 0;  // Track position for rendering (skips hidden items)
 			for (int i=0; i<MENU_ITEM_COUNT; i++) {
@@ -7443,16 +7331,13 @@ int main(int argc , char* argv[]) {
 	LOG_info("total startup time %ims\n\n",SDL_GetTicks());
 	while (!quit) {
 		GFX_startFrame();
-		// Netplay: handle state sync and frame synchronization
+	
 		if (!Netplay_update((uint16_t)buttons, core.serialize_size, core.serialize, core.unserialize)) {
 			continue;  // Skip frame (syncing or stalled)
 		}
-		// GBA Link: Process connection notifications and poll/deliver packets
 		GBALink_update();
 		GBALink_pollAndDeliverPackets();
 		core.run();
-
-		// Netplay: advance frame counter after running
 		if (Netplay_isActive()) {
 			Netplay_postFrame();
 		}
@@ -7469,13 +7354,11 @@ int main(int argc , char* argv[]) {
 
 		
 		if (show_menu) {
-			// Pause netplay connection while menu is open
 			if (Netplay_isConnected()) {
 				Netplay_pause();
 			}
 			PWR_updateFrequency(PWR_UPDATE_FREQ,1);
 			Menu_loop();
-			// Resume netplay connection after menu closes
 			if (Netplay_isPaused()) {
 				Netplay_resume();
 			}
@@ -7515,7 +7398,7 @@ int main(int argc , char* argv[]) {
 	
 finish:
 
-	Link_quitAll();
+	Netplay_quitAll();
 	Game_close();
 	Core_unload();
 	Core_quit();
@@ -7534,4 +7417,101 @@ finish:
 	GFX_quit();
 	SDL_WaitThread(screenshotsavethread, NULL);
 	return EXIT_SUCCESS;
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// Accessor functions for external modules
+//////////////////////////////////////////////////////////////////////////////
+
+// Screen/display accessors
+SDL_Surface* minarch_getScreen(void) { return screen; }
+int minarch_getDeviceWidth(void) { return DEVICE_WIDTH; }
+int minarch_getDeviceHeight(void) { return DEVICE_HEIGHT; }
+SDL_Surface* minarch_getMenuBitmap(void) { return menu.bitmap; }
+
+// Game state accessors
+const char* minarch_getCoreTag(void) { return core.tag; }
+const char* minarch_getGameName(void) { return game.name; }
+void* minarch_getGameData(void) { return game.data; }
+size_t minarch_getGameSize(void) { return game.size; }
+
+// Core option accessors
+char* minarch_getCoreOptionValue(const char* key) {
+	return OptionList_getOptionValue(&config.core, key);
+}
+void minarch_setCoreOptionValue(const char* key, const char* value) {
+	OptionList_setOptionValue(&config.core, key, value);
+}
+
+// Sleep state accessors
+void minarch_beforeSleep(void) { Menu_beforeSleep(); }
+void minarch_afterSleep(void) { Menu_afterSleep(); }
+
+// Platform accessors
+void minarch_hdmimon(void) { hdmimon(); }
+
+// Menu accessors
+int minarch_menuMessage(char* message, char** pairs) { return Menu_message(message, pairs); }
+
+// Save current config to file (used before core reset to preserve option changes)
+void minarch_saveConfig(void) { Config_write(CONFIG_WRITE_ALL); }
+
+//////////////////////////////////////////////////////////////////////////////
+// Utility/API functions for external modules
+//////////////////////////////////////////////////////////////////////////////
+
+void minarch_beginOptionsBatch(void) {
+	option_batch_mode = 1;
+	option_batch_changed = 0;
+}
+void minarch_endOptionsBatch(void) {
+	option_batch_mode = 0;
+	if (option_batch_changed) {
+		config.core.changed = 1;
+		option_batch_changed = 0;
+	}
+}
+
+// Force core to process option changes immediately (used by gblink.c and netplay_helper.c)
+// Runs one frame with video output suppressed to trigger check_variables()
+void minarch_forceCoreOptionUpdate(void) {
+	skip_video_output = 1;
+	core.run();
+	skip_video_output = 0;
+}
+
+
+// Reload the game to reinitialize core state (e.g., for gpSP serial mode changes)
+// Unloads and reloads the ROM so the core re-reads options during load_game()
+void minarch_reloadGame(void) {
+	SRAM_write();
+	core.unload_game();
+
+	struct retro_game_info game_info;
+	game_info.path = game.tmp_path[0] ? game.tmp_path : game.path;
+	game_info.data = game.data;
+	game_info.size = game.size;
+	core.load_game(&game_info);
+
+	SRAM_read();
+	Core_updateAVInfo();
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// Core callbacks
+//////////////////////////////////////////////////////////////////////////////
+
+// Wrapper for libretro log callback to intercept core messages
+static void core_log_callback(int level, const char* fmt, ...) {
+	char buffer[512];
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(buffer, sizeof(buffer), fmt, args);
+	va_end(args);
+
+	// Forward to normal log
+	LOG_note(level, "%s", buffer);
+
+	// Let GBLink process the message for connection state tracking
+	GBLink_processLogMessage(buffer);
 }

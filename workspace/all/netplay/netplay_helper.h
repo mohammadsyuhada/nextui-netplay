@@ -25,6 +25,13 @@ typedef enum {
     LINK_TYPE_GBLINK
 } LinkType;
 
+// Result of checking core link support capabilities
+typedef struct {
+    bool show_netplay;   // true if any link type is supported
+    bool has_netpacket;  // true if GBALink (netpacket interface) is supported
+    bool has_gblink;     // true if GBLink (gambatte network) is supported
+} CoreLinkSupport;
+
 //////////////////////////////////////////////////////////////////////////////
 // State Variables (defined in netplay_helper.c, used by minarch.c)
 //////////////////////////////////////////////////////////////////////////////
@@ -102,6 +109,19 @@ int getHostCount(LinkType type);
 void setHostCount(LinkType type, int count);
 int isLinkConnected(LinkType type);
 int* getForceResumeFlag(LinkType type);
+
+/**
+ * Check if any multiplayer session is active (Netplay, GBALink, or GBLink)
+ * @return 1 if any link type is connected, 0 otherwise
+ */
+int Multiplayer_isActive(void);
+
+/**
+ * Check which link types a core supports
+ * @param core_name Core name (e.g., "gpsp", "gambatte", "fbneo")
+ * @return CoreLinkSupport struct with support flags
+ */
+CoreLinkSupport checkCoreLinkSupport(const char* core_name);
 
 //////////////////////////////////////////////////////////////////////////////
 // Rendering Helpers
@@ -323,6 +343,6 @@ void showConnectionSuccessScreen(void);
  * Clean up all link sessions (GBLink, GBALink, Netplay)
  * Call before quit to ensure clean shutdown
  */
-void Link_quitAll(void);
+void Netplay_quitAll(void);
 
 #endif /* NETPLAY_HELPER_H */

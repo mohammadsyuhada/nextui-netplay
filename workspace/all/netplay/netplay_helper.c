@@ -18,50 +18,20 @@
 #include <unistd.h>
 
 //////////////////////////////////////////////////////////////////////////////
-// Extern declarations for minarch globals (defined in minarch.c)
+// Minarch accessor functions and types
 //////////////////////////////////////////////////////////////////////////////
 
-// Use accessor functions to avoid symbol conflicts with cores
-extern SDL_Surface* minarch_getScreen(void);
-extern int minarch_getDeviceWidth(void);
-extern int minarch_getDeviceHeight(void);
+// Minarch accessor and utility functions
+#include "minarch.h"
+
+// Convenience macros for accessor functions
 #define screen minarch_getScreen()
 #define DEVICE_WIDTH minarch_getDeviceWidth()
 #define DEVICE_HEIGHT minarch_getDeviceHeight()
 
-// Menu bitmap accessor (defined in minarch.c)
-extern SDL_Surface* minarch_getMenuBitmap(void);
 // Create a fake menu struct with just bitmap for compatibility
 static struct { SDL_Surface* bitmap; } _menu_accessor;
 #define menu (_menu_accessor.bitmap = minarch_getMenuBitmap(), _menu_accessor)
-
-// Accessor functions for core/game state (defined in minarch.c)
-// These avoid struct layout mismatches with LTO
-extern const char* minarch_getCoreTag(void);
-extern const char* minarch_getGameName(void);
-extern void* minarch_getGameData(void);
-extern size_t minarch_getGameSize(void);
-
-// Generic option functions (for core options used by GBA Link auto-configuration)
-typedef struct OptionList OptionList;
-extern OptionList* minarch_getCoreOptionList(void);
-extern char* OptionList_getOptionValue(OptionList* list, const char* key);
-extern void OptionList_setOptionValue(OptionList* list, const char* key, const char* value);
-
-// Force core to process option changes immediately
-extern void minarch_forceCoreOptionUpdate(void);
-
-// Save config and reload game (for link mode sync)
-extern void minarch_saveConfig(void);
-extern void minarch_reloadGame(void);  // Reload game to apply option changes
-
-// Menu functions (defined in minarch.c)
-extern void Menu_beforeSleep(void);
-extern void Menu_afterSleep(void);
-extern int Menu_message(char* message, char** pairs);
-
-// HDMI monitor function (defined in platform.c)
-extern void hdmimon(void);
 
 // String utility functions (defined in utils.c)
 extern int exactMatch(char* str1, char* str2);
@@ -221,8 +191,8 @@ static void showWiFiHelpDialog(void) {
             break;
         }
 
-        PWR_update(NULL, NULL, Menu_beforeSleep, Menu_afterSleep);
-        hdmimon();
+        PWR_update(NULL, NULL, minarch_beforeSleep, minarch_afterSleep);
+        minarch_hdmimon();
     }
 }
 
@@ -377,7 +347,7 @@ static bool showWiFiNetworkSelection(void) {
 
     // Ensure WiFi hardware is ready
     if (!WIFI_direct_ensureReady()) {
-        Menu_message("Failed to initialize WiFi.\n\nPlease try again.",
+        minarch_menuMessage("Failed to initialize WiFi.\n\nPlease try again.",
                      (char*[]){ "A","OKAY", NULL });
         return false;
     }
@@ -419,7 +389,7 @@ static bool showWiFiNetworkSelection(void) {
 
         // Check for overall timeout
         if (now - start_time > max_duration_ms) {
-            Menu_message("WiFi selection timed out.\n\nPlease try again.",
+            minarch_menuMessage("WiFi selection timed out.\n\nPlease try again.",
                          (char*[]){ "A","OKAY", NULL });
             return false;
         }
@@ -564,10 +534,10 @@ static bool showWiFiNetworkSelection(void) {
                         if (got_ip) {
                             return true;
                         }
-                        Menu_message("Connected but no IP.\n\nPlease try again.",
+                        minarch_menuMessage("Connected but no IP.\n\nPlease try again.",
                                      (char*[]){ "A","OKAY", NULL });
                     } else {
-                        Menu_message("Connection failed.\n\nPlease check the network\nand try again.",
+                        minarch_menuMessage("Connection failed.\n\nPlease check the network\nand try again.",
                                      (char*[]){ "A","OKAY", NULL });
                     }
                     dirty = 1;
@@ -604,10 +574,10 @@ static bool showWiFiNetworkSelection(void) {
                             if (got_ip) {
                                 return true;
                             }
-                            Menu_message("Connected but no IP.\n\nPlease try again.",
+                            minarch_menuMessage("Connected but no IP.\n\nPlease try again.",
                                          (char*[]){ "A","OKAY", NULL });
                         } else {
-                            Menu_message("Connection failed.\n\nIncorrect password or\nnetwork unavailable.",
+                            minarch_menuMessage("Connection failed.\n\nIncorrect password or\nnetwork unavailable.",
                                          (char*[]){ "A","OKAY", NULL });
                         }
                     }
@@ -620,19 +590,19 @@ static bool showWiFiNetworkSelection(void) {
             }
         }
 
-        PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
+        PWR_update(&dirty, NULL, minarch_beforeSleep, minarch_afterSleep);
 
         if (dirty) {
             renderWiFiNetworkList(networks, count, selected, connected_ssid);
             dirty = 0;
         }
 
-        hdmimon();
+        minarch_hdmimon();
     }
 
 #else
     // WiFi network selection not available on this platform
-    Menu_message("WiFi not available\non this platform.",
+    minarch_menuMessage("WiFi not available\non this platform.",
                  (char*[]){ "A","OKAY", NULL });
     return false;
 #endif
@@ -670,13 +640,13 @@ bool ensureWifiEnabled(void) {
     GFX_setMode(MODE_MENU);
 
     if (!ready) {
-        Menu_message("Failed to enable WiFi.\nPlease try again.", (char*[]){ "A","OKAY", NULL });
+        minarch_menuMessage("Failed to enable WiFi.\nPlease try again.", (char*[]){ "A","OKAY", NULL });
         return false;
     }
 
     return true;
 #else
-    Menu_message("WiFi not available\non this platform.", (char*[]){ "A","OKAY", NULL });
+    minarch_menuMessage("WiFi not available\non this platform.", (char*[]){ "A","OKAY", NULL });
     return false;
 #endif
 }
@@ -799,7 +769,7 @@ void showConnectedSuccess(uint32_t timeout_ms) {
         SDL_FreeSurface(text);
 
         GFX_flip(screen);
-        hdmimon();
+        minarch_hdmimon();
     }
     GFX_setMode(MODE_MENU);
 }
@@ -832,7 +802,7 @@ int Menu_selectConnectionMode(const char* title) {
             return selected;  // 0 = Hotspot, 1 = WiFi
         }
 
-        PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
+        PWR_update(&dirty, NULL, minarch_beforeSleep, minarch_afterSleep);
 
         if (dirty) {
             GFX_clear(screen);
@@ -891,7 +861,7 @@ int Menu_selectConnectionMode(const char* title) {
             dirty = 0;
         }
 
-        hdmimon();
+        minarch_hdmimon();
     }
 }
 
@@ -902,7 +872,7 @@ static int Menu_selectPokemonAdapter(void) {
     int dirty = 1;
 
     // Check current setting to pre-select
-    const char* current = OptionList_getOptionValue(minarch_getCoreOptionList(), "gpsp_serial");
+    const char* current = minarch_getCoreOptionValue("gpsp_serial");
     if (current && strcmp(current, "rfu") == 0) {
         selected = 1;  // Pre-select GBA Wireless Adapter if already set
     }
@@ -933,7 +903,7 @@ static int Menu_selectPokemonAdapter(void) {
             return selected;
         }
 
-        PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
+        PWR_update(&dirty, NULL, minarch_beforeSleep, minarch_afterSleep);
 
         if (dirty) {
             GFX_clear(screen);
@@ -993,7 +963,7 @@ static int Menu_selectPokemonAdapter(void) {
             dirty = 0;
         }
 
-        hdmimon();
+        minarch_hdmimon();
     }
 }
 
@@ -1068,6 +1038,28 @@ int* getForceResumeFlag(LinkType type) {
         case LINK_TYPE_GBLINK:  return &gblink_force_resume;
     }
     return NULL;
+}
+
+int Multiplayer_isActive(void) {
+    return GBALink_isConnected() || GBLink_isConnected() || Netplay_isConnected();
+}
+
+CoreLinkSupport checkCoreLinkSupport(const char* core_name) {
+    CoreLinkSupport support = {false, false, false};
+
+    if (Netplay_checkCoreSupport(core_name)) {
+        support.show_netplay = true;
+    }
+    if (GBALink_checkCoreSupport(core_name)) {
+        support.has_netpacket = true;
+        support.show_netplay = true;
+    }
+    if (GBLink_checkCoreSupport(core_name)) {
+        support.has_gblink = true;
+        support.show_netplay = true;
+    }
+
+    return support;
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -1238,7 +1230,7 @@ void showConnectionSuccessScreen(void) {
         SDL_FreeSurface(text);
 
         GFX_flip(screen);
-        hdmimon();
+        minarch_hdmimon();
     }
     GFX_setMode(MODE_MENU);
 }
@@ -1311,7 +1303,7 @@ void showTimedConfirmation(const char* message, int duration_ms) {
         SDL_FreeSurface(text);
 
         GFX_flip(screen);
-        hdmimon();
+        minarch_hdmimon();
     }
     GFX_setMode(MODE_MENU);
 }
@@ -1367,7 +1359,7 @@ static bool showConfirmDialog(const char* title, const char* message) {
         GFX_blitButtonGroup((char*[]){ "B","CANCEL", "A","CONTINUE", NULL }, 0, screen, 1);
 
         GFX_flip(screen);
-        hdmimon();
+        minarch_hdmimon();
     }
 }
 
@@ -1458,7 +1450,7 @@ static bool showLinkModeRestartDialog(const char* mode_name, bool is_host) {
         GFX_blitButtonGroup((char*[]){ "B","CANCEL", "A","RESTART", NULL }, 0, screen, 1);
 
         GFX_flip(screen);
-        hdmimon();
+        minarch_hdmimon();
     }
 }
 
@@ -1487,7 +1479,7 @@ void showLinkStatusMessage(
                  title, mode_str, state_str, local_ip, status_msg);
     }
 
-    Menu_message(msg, (char*[]){ "A","OKAY", NULL });
+    minarch_menuMessage(msg, (char*[]){ "A","OKAY", NULL });
 }
 
 void renderLinkMenuUI(
@@ -1609,7 +1601,7 @@ static void autoConfigureLinkCableForGBA(void) {
     if (!exactMatch((char*)minarch_getCoreTag(), "GBA")) return;
 
     // Check if we need to configure (disable or auto don't work for multiplayer)
-    const char* current = OptionList_getOptionValue(minarch_getCoreOptionList(),"gpsp_serial");
+    const char* current = minarch_getCoreOptionValue("gpsp_serial");
     bool needs_config = !current ||
                         strcmp(current, "disable") == 0 ||
                         strcmp(current, "auto") == 0;
@@ -1621,14 +1613,14 @@ static void autoConfigureLinkCableForGBA(void) {
     // Known games with specific multiplayer modes
     // Check "Advance Wars 2" before "Advance Wars" (more specific first)
     if (containsString((char*)game_name, "Pokemon")) {
-        OptionList_setOptionValue(minarch_getCoreOptionList(),"gpsp_serial", "mul_poke");
+        minarch_setCoreOptionValue("gpsp_serial", "mul_poke");
     } else if (containsString((char*)game_name, "Advance Wars 2")) {
-        OptionList_setOptionValue(minarch_getCoreOptionList(),"gpsp_serial", "mul_aw2");
+        minarch_setCoreOptionValue("gpsp_serial", "mul_aw2");
     } else if (containsString((char*)game_name, "Advance Wars")) {
-        OptionList_setOptionValue(minarch_getCoreOptionList(),"gpsp_serial", "mul_aw1");
+        minarch_setCoreOptionValue("gpsp_serial", "mul_aw1");
     } else {
         // Unknown games (including ROM hacks): default to GBA Wireless Adapter (RFU)
-        OptionList_setOptionValue(minarch_getCoreOptionList(),"gpsp_serial", "rfu");
+        minarch_setCoreOptionValue("gpsp_serial", "rfu");
     }
 
     minarch_forceCoreOptionUpdate();
@@ -1653,7 +1645,7 @@ int hostGame_common(LinkType type, void* list, int i) {
     if (already_connected) {
         char msg[128];
         snprintf(msg, sizeof(msg), "Already in %s session.\nDisconnect first.", session_name);
-        Menu_message(msg, (char*[]){ "A","OKAY", NULL });
+        minarch_menuMessage(msg, (char*[]){ "A","OKAY", NULL });
         return MENU_CALLBACK_NOP;
     }
 
@@ -1683,7 +1675,7 @@ int hostGame_common(LinkType type, void* list, int i) {
 
             // Check if selected adapter differs from current
             const char* new_mode = (adapter == 0) ? "mul_poke" : "rfu";
-            const char* current_mode = OptionList_getOptionValue(minarch_getCoreOptionList(), "gpsp_serial");
+            const char* current_mode = minarch_getCoreOptionValue("gpsp_serial");
 
             // If mode changed, need to restart for gpSP to pick up new setting
             if (!current_mode || strcmp(current_mode, new_mode) != 0) {
@@ -1691,7 +1683,7 @@ int hostGame_common(LinkType type, void* list, int i) {
 
                 if (showLinkModeRestartDialog(new_mode_name, true)) {
                     // Apply setting, save, reload
-                    OptionList_setOptionValue(minarch_getCoreOptionList(), "gpsp_serial", new_mode);
+                    minarch_setCoreOptionValue("gpsp_serial", new_mode);
                     minarch_saveConfig();
                     minarch_reloadGame();  // Deferred to avoid segfault
                     // Set force_resume to close all menus
@@ -1729,7 +1721,7 @@ int hostGame_common(LinkType type, void* list, int i) {
 
 int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
 #ifndef HAS_WIFIMG
-    Menu_message("WiFi not available\non this platform.", (char*[]){ "A","OKAY", NULL });
+    minarch_menuMessage("WiFi not available\non this platform.", (char*[]){ "A","OKAY", NULL });
     return MENU_CALLBACK_NOP;
 #endif
 
@@ -1759,7 +1751,7 @@ int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
     const char* pass = WIFI_direct_getHotspotPassword();
 
     if (WIFI_direct_startHotspot(ssid, pass) != 0) {
-        Menu_message("Failed to start hotspot.\nCheck device capabilities.", (char*[]){ "A","OKAY", NULL });
+        minarch_menuMessage("Failed to start hotspot.\nCheck device capabilities.", (char*[]){ "A","OKAY", NULL });
         return MENU_CALLBACK_NOP;
     }
 
@@ -1772,7 +1764,7 @@ int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
         case LINK_TYPE_NETPLAY: start_result = Netplay_startHost(game_name, crc, hotspot_ip); break;
         case LINK_TYPE_GBALINK: {
             // Get current link mode to sync with client
-            const char* link_mode = OptionList_getOptionValue(minarch_getCoreOptionList(), "gpsp_serial");
+            const char* link_mode = minarch_getCoreOptionValue("gpsp_serial");
             start_result = GBALink_startHost(game_name, crc, hotspot_ip, link_mode);
             break;
         }
@@ -1781,7 +1773,7 @@ int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
 
     if (start_result != 0) {
         WIFI_direct_stopHotspot();
-        Menu_message("Failed to start host.\nCheck device capabilities.", (char*[]){ "A","OKAY", NULL });
+        minarch_menuMessage("Failed to start host.\nCheck device capabilities.", (char*[]){ "A","OKAY", NULL });
         return MENU_CALLBACK_NOP;
     }
 
@@ -1835,7 +1827,7 @@ int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
             if (connected) break;
         }
 
-        PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
+        PWR_update(&dirty, NULL, minarch_beforeSleep, minarch_afterSleep);
 
         if (dirty) {
             renderHotspotWaitingScreen(code);
@@ -1848,7 +1840,7 @@ int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
             dirty = 0;
         }
 
-        hdmimon();
+        minarch_hdmimon();
     }
 
     // Handle cancellation
@@ -1906,7 +1898,7 @@ int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
             SDL_FreeSurface(text);
 
             GFX_flip(screen);
-            hdmimon();
+            minarch_hdmimon();
         }
         GFX_setMode(MODE_MENU);
 
@@ -1953,7 +1945,7 @@ int hostGameWiFi_common(LinkType type, const char* game_name, uint32_t crc) {
         case LINK_TYPE_NETPLAY: start_result = Netplay_startHost(game_name, crc, NULL); break;
         case LINK_TYPE_GBALINK: {
             // Get current link mode to sync with client
-            const char* link_mode = OptionList_getOptionValue(minarch_getCoreOptionList(), "gpsp_serial");
+            const char* link_mode = minarch_getCoreOptionValue("gpsp_serial");
             start_result = GBALink_startHost(game_name, crc, NULL, link_mode);
             break;
         }
@@ -1961,7 +1953,7 @@ int hostGameWiFi_common(LinkType type, const char* game_name, uint32_t crc) {
     }
 
     if (start_result != 0) {
-        Menu_message("Failed to start host.\nCheck WiFi connection.", (char*[]){ "A","OKAY", NULL });
+        minarch_menuMessage("Failed to start host.\nCheck WiFi connection.", (char*[]){ "A","OKAY", NULL });
         return MENU_CALLBACK_NOP;
     }
 
@@ -2019,7 +2011,7 @@ int hostGameWiFi_common(LinkType type, const char* game_name, uint32_t crc) {
             if (connected) break;
         }
 
-        PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
+        PWR_update(&dirty, NULL, minarch_beforeSleep, minarch_afterSleep);
 
         if (dirty) {
             renderWiFiWaitingScreen(ip);
@@ -2032,7 +2024,7 @@ int hostGameWiFi_common(LinkType type, const char* game_name, uint32_t crc) {
             dirty = 0;
         }
 
-        hdmimon();
+        minarch_hdmimon();
     }
 
     // Handle cancellation
@@ -2099,7 +2091,7 @@ int joinGameWiFi_common(LinkType type) {
         case LINK_TYPE_GBLINK:  start_result = GBLink_startDiscovery(); break;
     }
     if (start_result != 0) {
-        Menu_message("Failed to start discovery.\nCheck WiFi connection.", (char*[]){ "A","OKAY", NULL });
+        minarch_menuMessage("Failed to start discovery.\nCheck WiFi connection.", (char*[]){ "A","OKAY", NULL });
         return MENU_CALLBACK_NOP;
     }
 
@@ -2144,7 +2136,7 @@ int joinGameWiFi_common(LinkType type) {
             }
         }
 
-        PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
+        PWR_update(&dirty, NULL, minarch_beforeSleep, minarch_afterSleep);
 
         // Keep showing scanning message
         if (dirty) {
@@ -2152,7 +2144,7 @@ int joinGameWiFi_common(LinkType type) {
             dirty = 0;
         }
 
-        hdmimon();
+        minarch_hdmimon();
     }
     GFX_setMode(MODE_MENU);
 
@@ -2164,7 +2156,7 @@ int joinGameWiFi_common(LinkType type) {
             case LINK_TYPE_GBLINK:  GBLink_stopDiscovery(); break;
         }
         if (!cancelled) {
-            Menu_message("No hosts found.\n\nMake sure:\n1. Both devices on same WiFi\n2. Host started first",
+            minarch_menuMessage("No hosts found.\n\nMake sure:\n1. Both devices on same WiFi\n2. Host started first",
                          (char*[]){ "A","OKAY", NULL });
         }
         return MENU_CALLBACK_NOP;
@@ -2221,14 +2213,14 @@ int joinGameWiFi_common(LinkType type) {
             }
         }
 
-        PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
+        PWR_update(&dirty, NULL, minarch_beforeSleep, minarch_afterSleep);
 
         if (dirty) {
             renderHostSelectionList(type, selected, getHostCount(type));
             dirty = 0;
         }
 
-        hdmimon();
+        minarch_hdmimon();
     }
 
     // Stop discovery AFTER selection is made
@@ -2242,13 +2234,13 @@ int joinGameWiFi_common(LinkType type) {
     // This allows showing the sync dialog without making a network connection
     if (type == LINK_TYPE_GBALINK) {
         const char* host_mode = getHostLinkMode(type, selected);
-        const char* client_mode = OptionList_getOptionValue(minarch_getCoreOptionList(), "gpsp_serial");
+        const char* client_mode = minarch_getCoreOptionValue("gpsp_serial");
 
         // Check if modes differ (need reload for gpsp to pick up new mode)
         if (host_mode && host_mode[0] && (!client_mode || strcmp(client_mode, host_mode) != 0)) {
             if (showLinkModeRestartDialog(getGBALinkModeName(host_mode), false)) {
                 // User confirmed - apply mode, save config, reload (no TCP connection was made)
-                OptionList_setOptionValue(minarch_getCoreOptionList(), "gpsp_serial", host_mode);
+                minarch_setCoreOptionValue("gpsp_serial", host_mode);
                 minarch_saveConfig();
                 minarch_reloadGame();  // Deferred to avoid segfault
                 gbalink_force_resume = 1;
@@ -2274,7 +2266,7 @@ int joinGameWiFi_common(LinkType type) {
     }
 
     if (connect_result == GBALINK_CONNECT_ERROR) {
-        Menu_message("Connection failed.", (char*[]){ "A","OKAY", NULL });
+        minarch_menuMessage("Connection failed.", (char*[]){ "A","OKAY", NULL });
         return MENU_CALLBACK_NOP;
     }
 
@@ -2358,7 +2350,7 @@ int joinGame_Hotspot_common(LinkType type) {
         snprintf(no_host_msg, sizeof(no_host_msg),
             "No %s host found.\n\nMake sure the host has\nstarted %s first.",
             display_name, type == LINK_TYPE_NETPLAY ? "hosting" : "a link session");
-        Menu_message(no_host_msg, (char*[]){ "A","OKAY", NULL });
+        minarch_menuMessage(no_host_msg, (char*[]){ "A","OKAY", NULL });
         return MENU_CALLBACK_NOP;
     }
 
@@ -2393,7 +2385,7 @@ int joinGame_Hotspot_common(LinkType type) {
             show_selection = 0;
         }
 
-        PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
+        PWR_update(&dirty, NULL, minarch_beforeSleep, minarch_afterSleep);
 
         if (dirty) {
             GFX_clear(screen);
@@ -2450,7 +2442,7 @@ int joinGame_Hotspot_common(LinkType type) {
             dirty = 0;
         }
 
-        hdmimon();
+        minarch_hdmimon();
     }
 
     // Connect to selected hotspot
@@ -2472,7 +2464,7 @@ int joinGame_Hotspot_common(LinkType type) {
 
     if (wifi_connect_result != 0) {
         WIFI_direct_restorePreviousConnection();  // Restore WiFi so next scan works
-        Menu_message("Failed to connect to host.", (char*[]){ "A","OKAY", NULL });
+        minarch_menuMessage("Failed to connect to host.", (char*[]){ "A","OKAY", NULL });
         return MENU_CALLBACK_NOP;
     }
 
@@ -2501,13 +2493,13 @@ int joinGame_Hotspot_common(LinkType type) {
         int query_result = GBALink_queryHostLinkMode(host_ip, host_mode, sizeof(host_mode));
 
         if (query_result == 0 && host_mode[0]) {
-            const char* client_mode = OptionList_getOptionValue(minarch_getCoreOptionList(), "gpsp_serial");
+            const char* client_mode = minarch_getCoreOptionValue("gpsp_serial");
 
             // Check if modes differ
             if (!client_mode || strcmp(client_mode, host_mode) != 0) {
                 if (showLinkModeRestartDialog(getGBALinkModeName(host_mode), false)) {
                     // User confirmed - apply mode, save config, disconnect from hotspot, reload
-                    OptionList_setOptionValue(minarch_getCoreOptionList(), "gpsp_serial", host_mode);
+                    minarch_setCoreOptionValue("gpsp_serial", host_mode);
                     minarch_saveConfig();
                     WIFI_direct_restorePreviousConnection();
                     *connected_to_hotspot_flag = 0;
@@ -2541,7 +2533,7 @@ int joinGame_Hotspot_common(LinkType type) {
     }
 
     if (connect_result == GBALINK_CONNECT_ERROR || (connect_result != 0 && connect_result != GBALINK_CONNECT_NEEDS_RELOAD)) {
-        Menu_message("Failed to connect to host.\n\nConnection timed out.", (char*[]){ "A","OKAY", NULL });
+        minarch_menuMessage("Failed to connect to host.\n\nConnection timed out.", (char*[]){ "A","OKAY", NULL });
         WIFI_direct_restorePreviousConnection();
         *connected_to_hotspot_flag = 0;
         return MENU_CALLBACK_NOP;
@@ -2593,7 +2585,7 @@ int joinGame_common(LinkType type, void* list, int i) {
     if (connected) {
         char msg[128];
         snprintf(msg, sizeof(msg), "Already in %s session.\nDisconnect first.", session_name);
-        Menu_message(msg, (char*[]){ "A","OKAY", NULL });
+        minarch_menuMessage(msg, (char*[]){ "A","OKAY", NULL });
         return MENU_CALLBACK_NOP;
     }
 
@@ -2632,7 +2624,7 @@ int disconnect_common(LinkType type, void* list, int i) {
     if (disconnected) {
         char msg[128];
         snprintf(msg, sizeof(msg), "Not in a %s session.", session_name);
-        Menu_message(msg, (char*[]){ "A","OKAY", NULL });
+        minarch_menuMessage(msg, (char*[]){ "A","OKAY", NULL });
         return MENU_CALLBACK_NOP;
     }
 
@@ -2859,7 +2851,7 @@ const char* getNetplayMenuHint(void) {
     int hasUnionRoom = isPokemon && (isFireRed || isLeafGreen || isEmerald);
 
     // Check current link cable setting
-    const char* link_mode = OptionList_getOptionValue(minarch_getCoreOptionList(),"gpsp_serial");
+    const char* link_mode = minarch_getCoreOptionValue("gpsp_serial");
     int isPokemonGen3Mode = link_mode && strcmp(link_mode, "mul_poke") == 0;
 
     // Show Union Room hint only if game supports it AND currently set to Pokemon Gen3
@@ -2968,14 +2960,14 @@ int Netplay_menu_link(LinkType type) {
             show_menu = 0;
         }
 
-        PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
+        PWR_update(&dirty, NULL, minarch_beforeSleep, minarch_afterSleep);
 
         if (dirty) {
             renderLinkMenuUI("Netplay", items, item_count, selected, getHint);
             dirty = 0;
         }
 
-        hdmimon();
+        minarch_hdmimon();
     }
 
     return *force_resume;
@@ -2985,7 +2977,7 @@ int Netplay_menu_link(LinkType type) {
 // Link Cleanup
 //////////////////////////////////////////////////////////////////////////////
 
-void Link_quitAll(void) {
+void Netplay_quitAll(void) {
     GBLink_quit();
     GBALink_quit();
     Netplay_quit();

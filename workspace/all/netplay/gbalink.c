@@ -351,7 +351,7 @@ void GBALink_clearPendingReload(void) {
 // and the caller must reload the game for gpsp to pick it up
 void GBALink_applyPendingLinkMode(void) {
     if (gl.needs_reload && gl.pending_link_mode[0]) {
-        OptionList_setOptionValue(minarch_getCoreOptionList(), "gpsp_serial", gl.pending_link_mode);
+        minarch_setCoreOptionValue("gpsp_serial", gl.pending_link_mode);
         GBALink_clearPendingReload();
     }
 }
@@ -774,7 +774,7 @@ int GBALink_connectToHost(const char* ip, uint16_t port) {
                     const char* host_link_mode = (const char*)data;
                     if (host_link_mode[0]) {
                         // Get client's current link mode
-                        const char* client_mode = OptionList_getOptionValue(minarch_getCoreOptionList(), "gpsp_serial");
+                        const char* client_mode = minarch_getCoreOptionValue("gpsp_serial");
 
                         // Check if modes differ (need reload for gpsp to pick up new mode)
                         if (!client_mode || strcmp(client_mode, host_link_mode) != 0) {

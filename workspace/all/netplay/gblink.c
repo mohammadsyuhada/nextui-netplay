@@ -165,25 +165,25 @@ bool GBLink_checkCoreSupport(const char* core_name) {
 static void GBLink_setCorePort(uint16_t port) {
     char port_str[8];
     snprintf(port_str, sizeof(port_str), "%d", port);
-    OptionList_setOptionValue(minarch_getCoreOptionList(),"gambatte_gb_link_network_port", port_str);
+    minarch_setCoreOptionValue("gambatte_gb_link_network_port", port_str);
 }
 
 // Set gambatte_gb_link_mode to "Network Server"
 void GBLink_setCoreOptionsForHost(void) {
-    OptionList_beginBatch();
+    minarch_beginOptionsBatch();
     GBLink_setCorePort(gl.port);
-    OptionList_setOptionValue(minarch_getCoreOptionList(),"gambatte_gb_link_mode", "Network Server");
-    OptionList_endBatchCore();
+    minarch_setCoreOptionValue("gambatte_gb_link_mode", "Network Server");
+    minarch_endOptionsBatch();
     // Force gambatte to process options and start TCP server immediately
     minarch_forceCoreOptionUpdate();
 }
 
 // Set gambatte_gb_link_mode to "Network Client" and configure IP digit options
 void GBLink_setCoreOptionsForClient(const char* ip) {
-    OptionList_beginBatch();
+    minarch_beginOptionsBatch();
 
     GBLink_setCorePort(gl.port);
-    OptionList_setOptionValue(minarch_getCoreOptionList(),"gambatte_gb_link_mode", "Network Client");
+    minarch_setCoreOptionValue("gambatte_gb_link_mode", "Network Client");
 
     // Convert IP address to 12 digits for gambatte's options
     // IP like "192.168.1.100" becomes digits: 1,9,2,1,6,8,0,0,1,1,0,0
@@ -202,7 +202,7 @@ void GBLink_setCoreOptionsForClient(const char* ip) {
         // Validate octet range
         if (octet < 0 || octet > 255) {
             LOG_warn("GBLink: Invalid IP octet: %d\n", octet);
-            OptionList_endBatchCore();  // End batch even on error
+            minarch_endOptionsBatch();  // End batch even on error
             return;
         }
         // Format as 3 digits with leading zeros
@@ -222,10 +222,10 @@ void GBLink_setCoreOptionsForClient(const char* ip) {
         char key[64];
         char val[2] = {digits[i], '\0'};
         snprintf(key, sizeof(key), "gambatte_gb_link_network_server_ip_%d", i + 1);
-        OptionList_setOptionValue(minarch_getCoreOptionList(),key, val);
+        minarch_setCoreOptionValue(key, val);
     }
 
-    OptionList_endBatchCore();
+    minarch_endOptionsBatch();
     minarch_forceCoreOptionUpdate();
 }
 
@@ -237,18 +237,18 @@ void GBLink_setCoreOptionsDisconnect(void) {
         return;
     }
 
-    OptionList_beginBatch();
+    minarch_beginOptionsBatch();
 
-    OptionList_setOptionValue(minarch_getCoreOptionList(),"gambatte_gb_link_mode", "Not Connected");
+    minarch_setCoreOptionValue("gambatte_gb_link_mode", "Not Connected");
 
     // Reset IP digit options to default (0)
     for (int i = 0; i < 12; i++) {
         char key[64];
         snprintf(key, sizeof(key), "gambatte_gb_link_network_server_ip_%d", i + 1);
-        OptionList_setOptionValue(minarch_getCoreOptionList(),key, "0");
+        minarch_setCoreOptionValue(key, "0");
     }
 
-    OptionList_endBatchCore();
+    minarch_endOptionsBatch();
 }
 
 //////////////////////////////////////////////////////////////////////////////

@@ -107,21 +107,7 @@ void GBLink_notifyConnectionFromCore(bool connected);
 // Called by minarch's log callback - returns true if message was handled
 void GBLink_processLogMessage(const char* message);
 
-// Generic option functions (implemented in minarch.c)
-// Forward declaration for opaque pointer
-typedef struct OptionList OptionList;
-extern OptionList* minarch_getCoreOptionList(void);
-extern void OptionList_setOptionValue(OptionList* list, const char* key, const char* value);
-
-// Batch mode for setting multiple core options atomically
-// Use these to defer config.core.changed flag until all options are set
-// This prevents gambatte from seeing partial updates (e.g., incomplete IP address)
-extern void OptionList_beginBatch(void);
-extern void OptionList_endBatchCore(void);
-
-// Force core to process option changes immediately (implemented in minarch.c)
-// Runs one frame with video output suppressed to trigger check_variables()
-// Use after setting options to immediately start/stop TCP server or link mode
-extern void minarch_forceCoreOptionUpdate(void);
+// Minarch accessor and utility functions
+#include "minarch.h"
 
 #endif /* GBLINK_H */

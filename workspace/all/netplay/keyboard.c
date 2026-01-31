@@ -12,15 +12,12 @@
 #include "defines.h"
 #include "api.h"
 
-// External globals from minarch.c
-extern SDL_Surface* minarch_getScreen(void);
+// Minarch accessor and utility functions
+#include "minarch.h"
 #define screen minarch_getScreen()
-extern struct GFX_Fonts font;
 
-// External functions from minarch.c
-extern void Menu_beforeSleep(void);
-extern void Menu_afterSleep(void);
-extern void hdmimon(void);
+// External globals from minarch.c
+extern struct GFX_Fonts font;
 
 #define KB_ROWS 5
 #define KB_COLS 14
@@ -265,14 +262,14 @@ char* Keyboard_show(const char* title) {
             }
         }
 
-        PWR_update(&dirty, NULL, Menu_beforeSleep, Menu_afterSleep);
+        PWR_update(&dirty, NULL, minarch_beforeSleep, minarch_afterSleep);
 
         if (dirty) {
             kb_draw(title, input, cur_row, cur_col, shift);
             dirty = 0;
         }
 
-        hdmimon();
+        minarch_hdmimon();
     }
 }
 
