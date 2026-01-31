@@ -386,6 +386,15 @@ static bool parse_version_dir(const char* dir_name, const char* expected_platfor
     return true;
 }
 
+// Compare function for qsort - sorts version directories in descending order (newest first)
+// Version format: "NextUI-YYYYMMDD-N-commit-platform"
+static int compare_version_dirs_desc(const void* a, const void* b) {
+    const char* dir_a = *(const char**)a;
+    const char* dir_b = *(const char**)b;
+    // Reverse comparison for descending order (newest first)
+    return strcmp(dir_b, dir_a);
+}
+
 bool FileOps_findCompatibleVersion(FileList* files, char* version_out, int version_size, char* commit_out, int commit_size) {
     if (!files || files->count == 0 || !version_out || !commit_out) return false;
 
@@ -399,20 +408,47 @@ bool FileOps_findCompatibleVersion(FileList* files, char* version_out, int versi
     DIR* dir = opendir(bin_dir);
     if (!dir) return false;
 
+    // First pass: collect all matching version directories
+    #define MAX_VERSION_DIRS 64
+    char* version_dirs[MAX_VERSION_DIRS];
+    int dir_count = 0;
+
     struct dirent* entry;
-    while ((entry = readdir(dir)) != NULL) {
+    while ((entry = readdir(dir)) != NULL && dir_count < MAX_VERSION_DIRS) {
         // Skip . and ..
         if (entry->d_name[0] == '.') continue;
 
-        // Try to parse as version directory
+        // Try to parse as version directory for our platform
         char ver[64], commit[32];
         if (!parse_version_dir(entry->d_name, platform, ver, sizeof(ver), commit, sizeof(commit))) {
             continue;
         }
 
+        // Store the directory name
+        version_dirs[dir_count] = strdup(entry->d_name);
+        if (version_dirs[dir_count]) {
+            dir_count++;
+        }
+    }
+    closedir(dir);
+
+    if (dir_count == 0) {
+        return false;
+    }
+
+    // Sort directories in descending order (newest first)
+    // Version format "NextUI-YYYYMMDD-N-..." sorts correctly with strcmp
+    qsort(version_dirs, dir_count, sizeof(char*), compare_version_dirs_desc);
+
+    // Second pass: check each version for compatibility, starting from newest
+    bool found = false;
+    for (int d = 0; d < dir_count && !found; d++) {
+        char ver[64], commit[32];
+        parse_version_dir(version_dirs[d], platform, ver, sizeof(ver), commit, sizeof(commit));
+
         // Check if this version's original files match current system files
         char original_dir[600];
-        snprintf(original_dir, sizeof(original_dir), "%s/%s/original", bin_dir, entry->d_name);
+        snprintf(original_dir, sizeof(original_dir), "%s/%s/original", bin_dir, version_dirs[d]);
 
         if (access(original_dir, F_OK) != 0) continue;
 
@@ -448,11 +484,14 @@ bool FileOps_findCompatibleVersion(FileList* files, char* version_out, int versi
             version_out[version_size - 1] = '\0';
             strncpy(commit_out, commit, commit_size - 1);
             commit_out[commit_size - 1] = '\0';
-            closedir(dir);
-            return true;
+            found = true;
         }
     }
 
-    closedir(dir);
-    return false;
+    // Cleanup allocated strings
+    for (int i = 0; i < dir_count; i++) {
+        free(version_dirs[i]);
+    }
+
+    return found;
 }
