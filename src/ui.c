@@ -58,11 +58,20 @@ static void render_header(SDL_Surface* screen, const char* title, int show_setti
 
 // Get menu item label based on current state
 const char* UI_getMenuLabel(MenuItem item, NetplayState state) {
-    static char about_label[64];  // Static buffer for dynamic About label
+    static char toggle_label[128];  // Static buffer for dynamic toggle label
+    static char about_label[64];    // Static buffer for dynamic About label
 
     switch (item) {
         case MENU_TOGGLE:
-            return (state == NETPLAY_STATE_ENABLED) ? "Disable Netplay" : "Enable Netplay";
+            if (state == NETPLAY_STATE_ENABLED) {
+                return "Disable Netplay";
+            } else if (using_compatible_version && strlen(compatible_version) > 0) {
+                // Show which version's patches will be used
+                snprintf(toggle_label, sizeof(toggle_label), "Enable Netplay (Compatibility)");
+                return toggle_label;
+            } else {
+                return "Enable Netplay";
+            }
         case MENU_SUPPORTED:
             return "Supported Cores";
         case MENU_ABOUT: {
@@ -135,9 +144,11 @@ void UI_renderMenu(SDL_Surface* screen, int show_setting, int selected,
         }
     }
 
-    // Show unsupported version message below menu if version not supported
+    // Show messages below menu
+    int msg_y = menu_y + MENU_ITEM_COUNT * item_h + SCALE1(12);
+
     if (!version_supported && state != NETPLAY_STATE_ENABLED) {
-        int msg_y = menu_y + MENU_ITEM_COUNT * item_h + SCALE1(12);
+        // Version not supported at all
         SDL_Color warn_color = {255, 180, 100, 255};  // Orange/warning color
         SDL_Surface* warn1 = TTF_RenderUTF8_Blended(font.small, "Your NextUI version is not supported.", warn_color);
         if (warn1) {
@@ -148,6 +159,25 @@ void UI_renderMenu(SDL_Surface* screen, int show_setting, int selected,
         if (warn2) {
             SDL_BlitSurface(warn2, NULL, screen, &(SDL_Rect){SCALE1(PADDING + BUTTON_PADDING), msg_y + SCALE1(16), 0, 0});
             SDL_FreeSurface(warn2);
+        }
+    } else if (using_compatible_version && strlen(compatible_version) > 0 && state == NETPLAY_STATE_DISABLED) {
+        // Using backward-compatible patches
+        SDL_Color info_color = {100, 200, 255, 255};  // Light blue/info color
+
+        // Explanation line
+        SDL_Surface* info1 = TTF_RenderUTF8_Blended(font.small, "No patches for current NextUI version.", info_color);
+        if (info1) {
+            SDL_BlitSurface(info1, NULL, screen, &(SDL_Rect){SCALE1(PADDING + BUTTON_PADDING), msg_y, 0, 0});
+            SDL_FreeSurface(info1);
+        }
+
+        // Compatible version info with commit
+        char compat_msg[128];
+        snprintf(compat_msg, sizeof(compat_msg), "Using patches from %s (%s)", compatible_version, compatible_commit);
+        SDL_Surface* info2 = TTF_RenderUTF8_Blended(font.small, compat_msg, info_color);
+        if (info2) {
+            SDL_BlitSurface(info2, NULL, screen, &(SDL_Rect){SCALE1(PADDING + BUTTON_PADDING), msg_y + SCALE1(16), 0, 0});
+            SDL_FreeSurface(info2);
         }
     }
 

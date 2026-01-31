@@ -40,11 +40,18 @@ static int supported_scroll = 0;
 static char pak_path[512] = "";
 static char platform[32] = "";
 static char system_version[64] = "";
+static char system_commit[32] = "";
 static FileList* file_list = NULL;
 
 // Current netplay state (verified via hash comparison)
 static NetplayState current_state = NETPLAY_STATE_DISABLED;
 static bool version_supported = false;
+
+// Compatible version info (when using backward compatibility)
+// Made non-static so UI can access them
+char compatible_version[64] = "";
+char compatible_commit[32] = "";
+bool using_compatible_version = false;
 
 // Error message buffer
 static char error_message[256] = "";
@@ -88,16 +95,56 @@ static void get_platform(void) {
 
 // Refresh current state by verifying file hashes
 static void refresh_state(void) {
-    version_supported = FileOps_isVersionSupported(system_version);
+    using_compatible_version = false;
+    compatible_version[0] = '\0';
+    compatible_commit[0] = '\0';
+
+    // First check if exact version+commit is supported
+    version_supported = FileOps_isVersionSupported(system_version, system_commit);
 
     if (version_supported) {
-        current_state = FileOps_verifyState(system_version, file_list);
-        // If unknown, fall back to saved state
+        // Exact version match - verify state
+        current_state = FileOps_verifyState(system_version, system_commit, file_list);
+
+        // If unknown (files don't match either patched or original),
+        // this likely means system was updated. Default to DISABLED (safer than false positive)
         if (current_state == NETPLAY_STATE_UNKNOWN) {
-            current_state = FileOps_getState();
+            current_state = NETPLAY_STATE_DISABLED;
         }
     } else {
-        current_state = NETPLAY_STATE_DISABLED;
+        // Check installed version - maybe system was updated and files need restoration
+        const char* installed = FileOps_getInstalledVersion();
+        if (installed && strlen(installed) > 0) {
+            // Parse the installed version
+            char inst_ver[64], inst_commit[32];
+            if (FileOps_parseInstalledVersion(installed, inst_ver, sizeof(inst_ver), inst_commit, sizeof(inst_commit))) {
+                // Check if this installed version's files can be used
+                NetplayState inst_state = FileOps_verifyState(inst_ver, inst_commit, file_list);
+                if (inst_state == NETPLAY_STATE_ENABLED) {
+                    // System files still match the installed patched version
+                    current_state = NETPLAY_STATE_ENABLED;
+                    // Use this version for disable operation
+                    strncpy(compatible_version, inst_ver, sizeof(compatible_version) - 1);
+                    strncpy(compatible_commit, inst_commit, sizeof(compatible_commit) - 1);
+                    using_compatible_version = true;
+                    version_supported = true;  // Can at least disable
+                    return;
+                }
+            }
+        }
+
+        // No exact match - try backward compatibility
+        // Look for a version whose original files match current system
+        if (FileOps_findCompatibleVersion(file_list, compatible_version, sizeof(compatible_version),
+                                          compatible_commit, sizeof(compatible_commit))) {
+            version_supported = true;
+            using_compatible_version = true;
+            current_state = NETPLAY_STATE_DISABLED;  // Original files match, so not patched
+        } else {
+            // No compatible version found
+            version_supported = false;
+            current_state = NETPLAY_STATE_DISABLED;
+        }
     }
 }
 
@@ -110,15 +157,23 @@ static void do_enable_netplay(void) {
         return;
     }
 
+    // Determine which version to use for patching
+    const char* use_version = using_compatible_version ? compatible_version : system_version;
+    const char* use_commit = using_compatible_version ? compatible_commit : system_commit;
+
     // Apply patched files
-    if (!FileOps_applyPatched(system_version, file_list)) {
+    if (!FileOps_applyPatched(use_version, use_commit, file_list)) {
         strncpy(error_message, "Failed to apply patched files.", sizeof(error_message) - 1);
         app_state = STATE_ERROR;
         return;
     }
 
     FileOps_saveState(NETPLAY_STATE_ENABLED);
-    FileOps_saveInstalledVersion(system_version);
+
+    // Save full version identifier (version-commit)
+    char version_id[128];
+    snprintf(version_id, sizeof(version_id), "%s-%s", use_version, use_commit);
+    FileOps_saveInstalledVersion(version_id);
 
     // Refresh state
     refresh_state();
@@ -127,13 +182,34 @@ static void do_enable_netplay(void) {
 
 // Disable netplay operation
 static void do_disable_netplay(void) {
-    const char* installed_ver = FileOps_getInstalledVersion();
-    if (!installed_ver || strlen(installed_ver) == 0) {
-        // Try using current system version
-        installed_ver = system_version;
+    char use_version[64] = "";
+    char use_commit[32] = "";
+
+    // First try to use the installed version info
+    const char* installed = FileOps_getInstalledVersion();
+    if (installed && strlen(installed) > 0) {
+        FileOps_parseInstalledVersion(installed, use_version, sizeof(use_version), use_commit, sizeof(use_commit));
     }
 
-    if (!FileOps_restoreOriginals(installed_ver, file_list)) {
+    // Fallback to compatible version if detected
+    if (strlen(use_version) == 0 && using_compatible_version) {
+        strncpy(use_version, compatible_version, sizeof(use_version) - 1);
+        strncpy(use_commit, compatible_commit, sizeof(use_commit) - 1);
+    }
+
+    // Final fallback to current system version
+    if (strlen(use_version) == 0) {
+        strncpy(use_version, system_version, sizeof(use_version) - 1);
+        strncpy(use_commit, system_commit, sizeof(use_commit) - 1);
+    }
+
+    if (strlen(use_commit) == 0) {
+        strncpy(error_message, "Cannot determine version to restore.\nCommit hash unknown.", sizeof(error_message) - 1);
+        app_state = STATE_ERROR;
+        return;
+    }
+
+    if (!FileOps_restoreOriginals(use_version, use_commit, file_list)) {
         strncpy(error_message, "Failed to restore original files.", sizeof(error_message) - 1);
         app_state = STATE_ERROR;
         return;
@@ -296,9 +372,12 @@ int main(int argc, char* argv[]) {
     get_pak_path();
     get_platform();
 
-    // Get system version
+    // Get system version and commit
     if (!Config_getSystemVersion(system_version, sizeof(system_version))) {
         strcpy(system_version, "Unknown");
+    }
+    if (!Config_getSystemCommit(system_commit, sizeof(system_commit))) {
+        strcpy(system_commit, "");
     }
 
     // Load file list from configuration
@@ -330,7 +409,12 @@ int main(int argc, char* argv[]) {
     if (current_state != NETPLAY_STATE_UNKNOWN) {
         FileOps_saveState(current_state);
         if (current_state == NETPLAY_STATE_ENABLED) {
-            FileOps_saveInstalledVersion(system_version);
+            // Save full version identifier
+            const char* use_version = using_compatible_version ? compatible_version : system_version;
+            const char* use_commit = using_compatible_version ? compatible_commit : system_commit;
+            char version_id[128];
+            snprintf(version_id, sizeof(version_id), "%s-%s", use_version, use_commit);
+            FileOps_saveInstalledVersion(version_id);
         }
     }
 

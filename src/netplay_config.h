@@ -28,4 +28,9 @@ void Config_freeFiles(FileList* list);
 // buffer must be at least 64 bytes
 bool Config_getSystemVersion(char* buffer, int buffer_size);
 
+// Get NextUI commit hash from system
+// Returns commit hash (e.g., "7d98d7f7") from line 2 of version.txt
+// buffer must be at least 16 bytes
+bool Config_getSystemCommit(char* buffer, int buffer_size);
+
 #endif

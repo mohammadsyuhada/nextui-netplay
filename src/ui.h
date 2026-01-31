@@ -16,6 +16,11 @@ typedef enum {
     MENU_ITEM_COUNT
 } MenuItem;
 
+// Extern declarations for compatibility info (defined in netplay.c)
+extern char compatible_version[64];
+extern char compatible_commit[32];
+extern bool using_compatible_version;
+
 // Initialize UI
 void UI_init(void);
 

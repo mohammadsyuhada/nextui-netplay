@@ -104,3 +104,31 @@ bool Config_getSystemVersion(char* buffer, int buffer_size) {
     fclose(f);
     return (strlen(buffer) > 0);
 }
+
+// Get NextUI commit hash from system (line 2 of version.txt)
+bool Config_getSystemCommit(char* buffer, int buffer_size) {
+    if (!buffer || buffer_size < 1) return false;
+    buffer[0] = '\0';
+
+    FILE* f = fopen(VERSION_FILE_PATH, "r");
+    if (!f) return false;
+
+    char line[128];
+    // Skip first line (version)
+    if (!fgets(line, sizeof(line), f)) {
+        fclose(f);
+        return false;
+    }
+
+    // Read second line (commit hash)
+    if (fgets(buffer, buffer_size, f)) {
+        // Remove trailing newline
+        char* nl = strchr(buffer, '\n');
+        if (nl) *nl = '\0';
+        char* cr = strchr(buffer, '\r');
+        if (cr) *cr = '\0';
+    }
+
+    fclose(f);
+    return (strlen(buffer) > 0);
+}

@@ -5,6 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <dirent.h>
 
 // Paths
 static char pak_path[512] = "";
@@ -131,36 +132,66 @@ const char* FileOps_getInstalledVersion(void) {
     return installed_version;
 }
 
-void FileOps_saveInstalledVersion(const char* version) {
-    if (!version) return;
+void FileOps_saveInstalledVersion(const char* version_id) {
+    if (!version_id) return;
 
-    strncpy(installed_version, version, sizeof(installed_version) - 1);
+    strncpy(installed_version, version_id, sizeof(installed_version) - 1);
 
     FILE* f = fopen(version_file, "w");
     if (f) {
-        fprintf(f, "%s\n", version);
+        fprintf(f, "%s\n", version_id);
         fclose(f);
     }
 }
 
-bool FileOps_isVersionSupported(const char* version) {
-    if (!version || strlen(version) == 0) return false;
+bool FileOps_parseInstalledVersion(const char* full, char* version_out, int version_size, char* commit_out, int commit_size) {
+    if (!full || !version_out || !commit_out) return false;
 
-    // Check if bin/{version}-{platform}/ directory exists
+    version_out[0] = '\0';
+    commit_out[0] = '\0';
+
+    // Format: "NextUI-YYYYMMDD-N-COMMITHASH"
+    // We need to find the last dash and split there
+    const char* last_dash = strrchr(full, '-');
+    if (!last_dash || last_dash == full) {
+        // No commit hash found, treat entire string as version (legacy format)
+        strncpy(version_out, full, version_size - 1);
+        version_out[version_size - 1] = '\0';
+        return false;  // No commit found
+    }
+
+    // Copy commit hash (after last dash)
+    strncpy(commit_out, last_dash + 1, commit_size - 1);
+    commit_out[commit_size - 1] = '\0';
+
+    // Copy version (before last dash)
+    int version_len = last_dash - full;
+    if (version_len >= version_size) version_len = version_size - 1;
+    strncpy(version_out, full, version_len);
+    version_out[version_len] = '\0';
+
+    return true;
+}
+
+bool FileOps_isVersionSupported(const char* version, const char* commit) {
+    if (!version || strlen(version) == 0) return false;
+    if (!commit || strlen(commit) == 0) return false;
+
+    // Check if bin/{version}-{commit}-{platform}/ directory exists
     char version_dir[600];
-    snprintf(version_dir, sizeof(version_dir), "%s/bin/%s-%s", pak_path, version, platform);
+    snprintf(version_dir, sizeof(version_dir), "%s/bin/%s-%s-%s", pak_path, version, commit, platform);
 
     return (access(version_dir, F_OK) == 0);
 }
 
-bool FileOps_applyPatched(const char* version, FileList* files) {
-    if (!version || !files || files->count == 0) return false;
+bool FileOps_applyPatched(const char* version, const char* commit, FileList* files) {
+    if (!version || !commit || !files || files->count == 0) return false;
 
     char cmd[1024];
 
-    // Source directory: bin/{version}-{platform}/patched/
+    // Source directory: bin/{version}-{commit}-{platform}/patched/
     char patched_dir[600];
-    snprintf(patched_dir, sizeof(patched_dir), "%s/bin/%s-%s/patched", pak_path, version, platform);
+    snprintf(patched_dir, sizeof(patched_dir), "%s/bin/%s-%s-%s/patched", pak_path, version, commit, platform);
 
     for (int i = 0; i < files->count; i++) {
         char src_path[600];
@@ -194,14 +225,14 @@ bool FileOps_applyPatched(const char* version, FileList* files) {
     return true;
 }
 
-bool FileOps_restoreOriginals(const char* version, FileList* files) {
-    if (!version || strlen(version) == 0 || !files || files->count == 0) return false;
+bool FileOps_restoreOriginals(const char* version, const char* commit, FileList* files) {
+    if (!version || strlen(version) == 0 || !commit || strlen(commit) == 0 || !files || files->count == 0) return false;
 
     char cmd[1024];
 
-    // Source directory: bin/{version}-{platform}/original/
+    // Source directory: bin/{version}-{commit}-{platform}/original/
     char original_dir[600];
-    snprintf(original_dir, sizeof(original_dir), "%s/bin/%s-%s/original", pak_path, version, platform);
+    snprintf(original_dir, sizeof(original_dir), "%s/bin/%s-%s-%s/original", pak_path, version, commit, platform);
 
     // Check if original directory exists
     if (access(original_dir, F_OK) != 0) {
@@ -244,16 +275,16 @@ const char* FileOps_getSystemDir(void) {
     return system_dir;
 }
 
-NetplayState FileOps_verifyState(const char* version, FileList* files) {
-    if (!version || strlen(version) == 0 || !files || files->count == 0) {
+NetplayState FileOps_verifyState(const char* version, const char* commit, FileList* files) {
+    if (!version || strlen(version) == 0 || !commit || strlen(commit) == 0 || !files || files->count == 0) {
         return NETPLAY_STATE_UNKNOWN;
     }
 
     // Build paths to patched and original directories
     char patched_dir[600];
     char original_dir[600];
-    snprintf(patched_dir, sizeof(patched_dir), "%s/bin/%s-%s/patched", pak_path, version, platform);
-    snprintf(original_dir, sizeof(original_dir), "%s/bin/%s-%s/original", pak_path, version, platform);
+    snprintf(patched_dir, sizeof(patched_dir), "%s/bin/%s-%s-%s/patched", pak_path, version, commit, platform);
+    snprintf(original_dir, sizeof(original_dir), "%s/bin/%s-%s-%s/original", pak_path, version, commit, platform);
 
     // Check if version directories exist
     if (access(patched_dir, F_OK) != 0 || access(original_dir, F_OK) != 0) {
@@ -308,4 +339,120 @@ NetplayState FileOps_verifyState(const char* version, FileList* files) {
 
     // Mixed or unknown state
     return NETPLAY_STATE_UNKNOWN;
+}
+
+// Helper to parse version directory name
+// Format: "{version}-{commit}-{platform}" e.g., "NextUI-20260130-0-7d98d7f-tg5040"
+// Returns true if parsing succeeded
+static bool parse_version_dir(const char* dir_name, const char* expected_platform,
+                              char* version_out, int version_size,
+                              char* commit_out, int commit_size) {
+    if (!dir_name || !expected_platform || !version_out || !commit_out) return false;
+
+    // Check if directory ends with expected platform
+    int dir_len = strlen(dir_name);
+    int plat_len = strlen(expected_platform);
+
+    if (dir_len <= plat_len + 1) return false;
+
+    // Check platform suffix
+    const char* suffix = dir_name + dir_len - plat_len;
+    if (strcmp(suffix, expected_platform) != 0) return false;
+
+    // Check there's a dash before platform
+    if (dir_name[dir_len - plat_len - 1] != '-') return false;
+
+    // Now we have "{version}-{commit}" before the "-{platform}"
+    int prefix_len = dir_len - plat_len - 1;
+    char prefix[256];
+    if (prefix_len >= (int)sizeof(prefix)) return false;
+    strncpy(prefix, dir_name, prefix_len);
+    prefix[prefix_len] = '\0';
+
+    // Find last dash to split version and commit
+    const char* last_dash = strrchr(prefix, '-');
+    if (!last_dash || last_dash == prefix) return false;
+
+    // Copy commit (after last dash)
+    strncpy(commit_out, last_dash + 1, commit_size - 1);
+    commit_out[commit_size - 1] = '\0';
+
+    // Copy version (before last dash)
+    int version_len = last_dash - prefix;
+    if (version_len >= version_size) version_len = version_size - 1;
+    strncpy(version_out, prefix, version_len);
+    version_out[version_len] = '\0';
+
+    return true;
+}
+
+bool FileOps_findCompatibleVersion(FileList* files, char* version_out, int version_size, char* commit_out, int commit_size) {
+    if (!files || files->count == 0 || !version_out || !commit_out) return false;
+
+    version_out[0] = '\0';
+    commit_out[0] = '\0';
+
+    // Open bin/ directory
+    char bin_dir[600];
+    snprintf(bin_dir, sizeof(bin_dir), "%s/bin", pak_path);
+
+    DIR* dir = opendir(bin_dir);
+    if (!dir) return false;
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        // Skip . and ..
+        if (entry->d_name[0] == '.') continue;
+
+        // Try to parse as version directory
+        char ver[64], commit[32];
+        if (!parse_version_dir(entry->d_name, platform, ver, sizeof(ver), commit, sizeof(commit))) {
+            continue;
+        }
+
+        // Check if this version's original files match current system files
+        char original_dir[600];
+        snprintf(original_dir, sizeof(original_dir), "%s/%s/original", bin_dir, entry->d_name);
+
+        if (access(original_dir, F_OK) != 0) continue;
+
+        // Compare all files
+        bool all_match = true;
+        int files_checked = 0;
+
+        for (int i = 0; i < files->count && all_match; i++) {
+            const char* basename = get_basename(files->files[i]);
+
+            char system_path[600];
+            char original_path[600];
+
+            snprintf(system_path, sizeof(system_path), "%s/%s", system_dir, files->files[i]);
+            snprintf(original_path, sizeof(original_path), "%s/%s", original_dir, basename);
+
+            // Skip if system file doesn't exist
+            if (access(system_path, F_OK) != 0) continue;
+            // Skip if original file doesn't exist
+            if (access(original_path, F_OK) != 0) continue;
+
+            files_checked++;
+
+            // Compare files
+            if (compare_files(system_path, original_path) != 0) {
+                all_match = false;
+            }
+        }
+
+        // If all files matched, we found a compatible version
+        if (all_match && files_checked > 0) {
+            strncpy(version_out, ver, version_size - 1);
+            version_out[version_size - 1] = '\0';
+            strncpy(commit_out, commit, commit_size - 1);
+            commit_out[commit_size - 1] = '\0';
+            closedir(dir);
+            return true;
+        }
+    }
+
+    closedir(dir);
+    return false;
 }
