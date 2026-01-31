@@ -366,7 +366,7 @@ static bool parse_version_dir(const char* dir_name, const char* expected_platfor
     int prefix_len = dir_len - plat_len - 1;
     char prefix[256];
     if (prefix_len >= (int)sizeof(prefix)) return false;
-    strncpy(prefix, dir_name, prefix_len);
+    memcpy(prefix, dir_name, prefix_len);
     prefix[prefix_len] = '\0';
 
     // Find last dash to split version and commit
