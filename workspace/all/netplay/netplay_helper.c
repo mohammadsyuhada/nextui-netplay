@@ -1781,15 +1781,10 @@ int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
     size_t prefix_len = strlen(LINK_HOTSPOT_SSID_PREFIX);
     const char* code = (strlen(ssid) > prefix_len) ? ssid + prefix_len : "????";
 
-    // Determine button configuration
-    int show_start_button = (type == LINK_TYPE_GBLINK);
-    int wait_for_auto_connect = (type != LINK_TYPE_GBLINK);
-
     // Wait loop
     int dirty = 1;
     int connected = 0;
     int cancelled = 0;
-    int manual_start = 0;
 
     GFX_setMode(MODE_MAIN);
     while (1) {
@@ -1802,40 +1797,47 @@ int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
             break;
         }
 
-        // Check for manual start (GBLink only)
-        if (show_start_button && PAD_justPressed(BTN_A)) {
-            manual_start = 1;
-            break;
-        }
-
-        // Check connection state (Netplay/GBALink only)
-        if (wait_for_auto_connect) {
-            switch (type) {
-                case LINK_TYPE_NETPLAY:
-                    if (Netplay_getState() == NETPLAY_STATE_SYNCING || Netplay_isConnected()) {
-                        connected = 1;
-                    }
+        // For GBLink: run a few core frames to let gambatte process TCP connections
+        // This triggers core_log_callback which updates GBLink connection state
+        // Running multiple frames improves detection speed
+        if (type == LINK_TYPE_GBLINK) {
+            for (int i = 0; i < 5; i++) {
+                minarch_forceCoreOptionUpdate();
+                if (GBLink_isConnected()) {
+                    connected = 1;
                     break;
-                case LINK_TYPE_GBALINK:
-                    if (GBALink_getState() == GBALINK_STATE_CONNECTED) {
-                        connected = 1;
-                    }
-                    break;
-                default:
-                    break;
+                }
             }
             if (connected) break;
+        }
+
+        // Check connection state for other types
+        switch (type) {
+            case LINK_TYPE_NETPLAY:
+                if (Netplay_getState() == NETPLAY_STATE_SYNCING || Netplay_isConnected()) {
+                    connected = 1;
+                }
+                break;
+            case LINK_TYPE_GBALINK:
+                if (GBALink_getState() == GBALINK_STATE_CONNECTED) {
+                    connected = 1;
+                }
+                break;
+            default:
+                break;
+        }
+        if (connected) break;
+
+        // For GBLink: skip the render delay to poll more frequently
+        if (type == LINK_TYPE_GBLINK) {
+            dirty = 1;  // Always redraw to keep loop fast
         }
 
         PWR_update(&dirty, NULL, minarch_beforeSleep, minarch_afterSleep);
 
         if (dirty) {
             renderHotspotWaitingScreen(code);
-            if (show_start_button) {
-                GFX_blitButtonGroup((char*[]){ "B","CANCEL", "A","CLOSE", NULL }, 1, screen, 1);
-            } else {
-                GFX_blitButtonGroup((char*[]){ "B","CANCEL", NULL }, 0, screen, 1);
-            }
+            GFX_blitButtonGroup((char*[]){ "B","CANCEL", NULL }, 0, screen, 1);
             GFX_flip(screen);
             dirty = 0;
         }
@@ -1863,15 +1865,7 @@ int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
         return MENU_CALLBACK_NOP;
     }
 
-    // Handle manual start (GBLink)
-    if (manual_start) {
-        GFX_setMode(MODE_MENU);
-        GBLink_stopBroadcast();  // Stop UDP broadcast - no longer needed after connection
-        gblink_force_resume = 1;
-        return MENU_CALLBACK_EXIT;
-    }
-
-    // Handle connection success (Netplay/GBALink) - show confirmation screen
+    // Handle connection success - show confirmation screen
     if (connected) {
         uint32_t start_time = SDL_GetTicks();
         while (SDL_GetTicks() - start_time < 3000) {
@@ -1903,15 +1897,17 @@ int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
         GFX_setMode(MODE_MENU);
 
         // Stop UDP broadcast - no longer needed after connection
-        if (type == LINK_TYPE_NETPLAY) {
-            Netplay_stopBroadcast();
+        switch (type) {
+            case LINK_TYPE_NETPLAY: Netplay_stopBroadcast(); break;
+            case LINK_TYPE_GBLINK:  GBLink_stopBroadcast(); break;
+            default: break;
         }
 
         // Set force resume flag
         switch (type) {
             case LINK_TYPE_NETPLAY: netplay_force_resume = 1; break;
             case LINK_TYPE_GBALINK: gbalink_force_resume = 1; break;
-            default: break;
+            case LINK_TYPE_GBLINK:  gblink_force_resume = 1; break;
         }
         return MENU_CALLBACK_EXIT;
     }
@@ -1968,15 +1964,10 @@ int hostGameWiFi_common(LinkType type, const char* game_name, uint32_t crc) {
         case LINK_TYPE_GBLINK:  ip = GBLink_getLocalIP(); break;
     }
 
-    // Determine behavior based on type
-    int show_start_button = (type == LINK_TYPE_GBLINK);
-    int wait_for_auto_connect = (type != LINK_TYPE_GBLINK);
-
     // Wait loop
     int dirty = 1;
     int connected = 0;
     int cancelled = 0;
-    int manual_start = 0;
 
     GFX_setMode(MODE_MAIN);
     while (1) {
@@ -1989,40 +1980,47 @@ int hostGameWiFi_common(LinkType type, const char* game_name, uint32_t crc) {
             break;
         }
 
-        // Check for manual start (GBLink only)
-        if (show_start_button && PAD_justPressed(BTN_A)) {
-            manual_start = 1;
-            break;
-        }
-
-        // Check connection state (Netplay/GBALink only)
-        if (wait_for_auto_connect) {
-            switch (type) {
-                case LINK_TYPE_NETPLAY:
-                    if (Netplay_getState() == NETPLAY_STATE_SYNCING || Netplay_isConnected()) {
-                        connected = 1;
-                    }
+        // For GBLink: run a few core frames to let gambatte process TCP connections
+        // This triggers core_log_callback which updates GBLink connection state
+        // Running multiple frames improves detection speed
+        if (type == LINK_TYPE_GBLINK) {
+            for (int i = 0; i < 5; i++) {
+                minarch_forceCoreOptionUpdate();
+                if (GBLink_isConnected()) {
+                    connected = 1;
                     break;
-                case LINK_TYPE_GBALINK:
-                    if (GBALink_getState() == GBALINK_STATE_CONNECTED) {
-                        connected = 1;
-                    }
-                    break;
-                default:
-                    break;
+                }
             }
             if (connected) break;
+        }
+
+        // Check connection state for other types
+        switch (type) {
+            case LINK_TYPE_NETPLAY:
+                if (Netplay_getState() == NETPLAY_STATE_SYNCING || Netplay_isConnected()) {
+                    connected = 1;
+                }
+                break;
+            case LINK_TYPE_GBALINK:
+                if (GBALink_getState() == GBALINK_STATE_CONNECTED) {
+                    connected = 1;
+                }
+                break;
+            default:
+                break;
+        }
+        if (connected) break;
+
+        // For GBLink: skip the render delay to poll more frequently
+        if (type == LINK_TYPE_GBLINK) {
+            dirty = 1;  // Always redraw to keep loop fast
         }
 
         PWR_update(&dirty, NULL, minarch_beforeSleep, minarch_afterSleep);
 
         if (dirty) {
             renderWiFiWaitingScreen(ip);
-            if (show_start_button) {
-                GFX_blitButtonGroup((char*[]){ "B","CANCEL", "A","CLOSE", NULL }, 1, screen, 1);
-            } else {
-                GFX_blitButtonGroup((char*[]){ "B","CANCEL", NULL }, 0, screen, 1);
-            }
+            GFX_blitButtonGroup((char*[]){ "B","CANCEL", NULL }, 0, screen, 1);
             GFX_flip(screen);
             dirty = 0;
         }
@@ -2050,28 +2048,22 @@ int hostGameWiFi_common(LinkType type, const char* game_name, uint32_t crc) {
         return MENU_CALLBACK_NOP;
     }
 
-    // Handle manual start (GBLink) - server already running
-    if (manual_start) {
-        GFX_setMode(MODE_MENU);
-        GBLink_stopBroadcast();  // Stop UDP broadcast - no longer needed after connection
-        gblink_force_resume = 1;
-        return MENU_CALLBACK_EXIT;
-    }
-
-    // Handle connection success (Netplay/GBALink) - show confirmation screen
+    // Handle connection success - show confirmation screen
     if (connected) {
         showConnectionSuccessScreen();
 
         // Stop UDP broadcast - no longer needed after connection
-        if (type == LINK_TYPE_NETPLAY) {
-            Netplay_stopBroadcast();
+        switch (type) {
+            case LINK_TYPE_NETPLAY: Netplay_stopBroadcast(); break;
+            case LINK_TYPE_GBLINK:  GBLink_stopBroadcast(); break;
+            default: break;
         }
 
         // Set force resume flag
         switch (type) {
             case LINK_TYPE_NETPLAY: netplay_force_resume = 1; break;
             case LINK_TYPE_GBALINK: gbalink_force_resume = 1; break;
-            default: break;
+            case LINK_TYPE_GBLINK:  gblink_force_resume = 1; break;
         }
         return MENU_CALLBACK_EXIT;
     }

@@ -93,7 +93,7 @@ void showConnectedSuccess(uint32_t timeout_ms);
 /**
  * Show mode selection UI for WiFi/Hotspot choice
  * @param title Title to display (e.g., "Host Game", "Join Game")
- * @return 0 = WiFi, 1 = Hotspot, -1 = Cancelled
+ * @return 0 = Hotspot, 1 = WiFi, -1 = Cancelled.
  */
 int Menu_selectConnectionMode(const char* title);
 

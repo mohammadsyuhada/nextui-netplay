@@ -4857,6 +4857,10 @@ static void video_refresh_callback(const void* data, unsigned width, unsigned he
 	// Early exit if quitting to avoid rendering stale frames
 	if (quit) return;
 
+	// Skip video output during forced core.run() calls (e.g., for link option processing)
+	// This prevents game frames from overwriting UI screens during option updates
+	if (skip_video_output) return;
+
 	// Allocate RGBA buffer if needed
 	if (!rgbaData || rgbaDataSize != width * height) {
 		if (rgbaData) free(rgbaData);

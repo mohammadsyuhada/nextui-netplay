@@ -266,6 +266,9 @@ int GBLink_startHost(const char* game_name, uint32_t game_crc, const char* hotsp
         gl.using_hotspot = true;
         strncpy(gl.local_ip, hotspot_ip, sizeof(gl.local_ip) - 1);
         gl.local_ip[sizeof(gl.local_ip) - 1] = '\0';
+    } else {
+        // WiFi mode - refresh local IP in case it changed since init
+        NET_getLocalIP(gl.local_ip, sizeof(gl.local_ip));
     }
 
     // Create UDP socket for discovery broadcasts
@@ -398,11 +401,19 @@ int GBLink_connectToHost(const char* ip, uint16_t port) {
     strncpy(gl.remote_ip, ip, sizeof(gl.remote_ip) - 1);
     gl.port = port;
 
-    // Set gambatte core options for client mode
+    // Set mode BEFORE setCoreOptionsForClient so log messages during
+    // minarch_forceCoreOptionUpdate() are processed correctly
+    gl.mode = GBLINK_CLIENT;
+    gl.state = GBLINK_STATE_CONNECTING;
+
+    // Set gambatte core options for client mode (this calls minarch_forceCoreOptionUpdate)
     GBLink_setCoreOptionsForClient(ip);
 
-    gl.mode = GBLINK_CLIENT;
-    gl.state = GBLINK_STATE_CONNECTED;  // Gambatte handles the actual TCP connection
+    // If connection succeeded during the core.run(), state will be CONNECTED
+    // Otherwise, it stays CONNECTING and we assume gambatte will connect on resume
+    if (gl.state != GBLINK_STATE_CONNECTED) {
+        gl.state = GBLINK_STATE_CONNECTED;  // Assume success - gambatte handles TCP
+    }
 
     snprintf(gl.status_msg, sizeof(gl.status_msg), "Connected to %s", ip);
     return 0;
@@ -507,11 +518,32 @@ int GBLink_getDiscoveredHosts(GBLinkHostInfo* hosts, int max_hosts) {
 //////////////////////////////////////////////////////////////////////////////
 
 GBLinkMode GBLink_getMode(void) { return gl.mode; }
-GBLinkState GBLink_getState(void) { return gl.state; }
-bool GBLink_isConnected(void) { return gl.state == GBLINK_STATE_CONNECTED; }
+
+GBLinkState GBLink_getState(void) {
+    if (!gl.initialized) return GBLINK_STATE_IDLE;
+    pthread_mutex_lock(&gl.mutex);
+    GBLinkState state = gl.state;
+    pthread_mutex_unlock(&gl.mutex);
+    return state;
+}
+
+bool GBLink_isConnected(void) {
+    if (!gl.initialized) return false;
+    pthread_mutex_lock(&gl.mutex);
+    bool connected = (gl.state == GBLINK_STATE_CONNECTED);
+    pthread_mutex_unlock(&gl.mutex);
+    return connected;
+}
 
 const char* GBLink_getStatusMessage(void) { return gl.status_msg; }
-const char* GBLink_getLocalIP(void) { return gl.local_ip; }
+
+const char* GBLink_getLocalIP(void) {
+    // Refresh IP if not in an active session (to avoid returning stale hotspot IP)
+    if (gl.mode == GBLINK_OFF) {
+        NET_getLocalIP(gl.local_ip, sizeof(gl.local_ip));
+    }
+    return gl.local_ip;
+}
 
 bool GBLink_isUsingHotspot(void) { return gl.using_hotspot; }
 
@@ -561,16 +593,16 @@ void GBLink_processLogMessage(const char* message) {
     // Only process if GBLink session is active
     if (gl.mode == GBLINK_OFF) return;
 
-    // Server connected to client
-    if (strstr(message, "server connected to client")) {
-        GBLink_notifyConnectionFromCore(true);
-    }
-    // Client connected to server
-    else if (strstr(message, "client connected to server")) {
+    // Check for connection messages (case-insensitive)
+    // Gambatte logs: "GameLink network server connected to client!" or similar
+    if (strcasestr(message, "server connected") ||
+        strcasestr(message, "client connected") ||
+        (strcasestr(message, "gamelink") && strcasestr(message, "connected"))) {
         GBLink_notifyConnectionFromCore(true);
     }
     // Network stopped (disconnection)
-    else if (strstr(message, "Stopping GameLink network")) {
+    else if (strcasestr(message, "Stopping GameLink") ||
+             strcasestr(message, "disconnected")) {
         GBLink_notifyConnectionFromCore(false);
     }
 }

@@ -1197,7 +1197,13 @@ void GBALink_getLocalIPSafe(char* buf, size_t buf_size) {
 }
 
 // Note: Returns pointer to internal buffer - use GBALink_getLocalIPSafe for thread safety
-const char* GBALink_getLocalIP(void) { return gl.local_ip; }
+const char* GBALink_getLocalIP(void) {
+    // Refresh IP if not in an active session (to avoid returning stale hotspot IP)
+    if (gl.mode == GBALINK_OFF) {
+        NET_getLocalIP(gl.local_ip, sizeof(gl.local_ip));
+    }
+    return gl.local_ip;
+}
 
 bool GBALink_isUsingHotspot(void) {
     if (!gl.initialized) return false;

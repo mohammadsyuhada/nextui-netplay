@@ -904,7 +904,14 @@ bool Netplay_isActive(void) {
 }
 
 const char* Netplay_getStatusMessage(void) { return np.status_msg; }
-const char* Netplay_getLocalIP(void) { return np.local_ip; }
+
+const char* Netplay_getLocalIP(void) {
+    // Refresh IP if not in an active session (to avoid returning stale hotspot IP)
+    if (np.mode == NETPLAY_OFF) {
+        NET_getLocalIP(np.local_ip, sizeof(np.local_ip));
+    }
+    return np.local_ip;
+}
 
 bool Netplay_hasNetworkConnection(void) {
     NET_getLocalIP(np.local_ip, sizeof(np.local_ip));
