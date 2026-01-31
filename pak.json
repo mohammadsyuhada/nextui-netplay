@@ -1,13 +1,13 @@
 {
   "name": "Netplay",
-  "version": "v1.0.3",
+  "version": "v1.1.0",
   "type": "TOOL",
   "description": "Enable/disable netplay for multiplayer gaming over WiFi.",
   "author": "mohammadsyuhada",
   "repo_url": "https://github.com/mohammadsyuhada/nextui-netplay",
   "release_filename": "Netplay.pak.zip",
   "changelog": {
-    "v1.0.3": "Fixed minor bugs and improved stability",
+    "v1.1.0": "Add NextUI v6.7.4 support, fix netplay connection reliability issues, and improve patch version compatibility",
     "v1.0.2": "Add multi-platform build support for tg5040 and tg5050",
     "v1.0.1": "Updated netplay settings and fixed connection issues",
     "v1.0.0": "Initial stable release"
