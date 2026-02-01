@@ -65,15 +65,10 @@ True multiplayer for GameBoy Advance/Game Boy Color/Game Boy. Each player has th
 6. Unmount your SD Card and insert it into your TrimUI device.
 
 ### Pak Store Installation
-
-1. Open `Pak Store` application in your TrimUI device. 
-2. Navigate to the `Browse` then `System` menu. 
-3. Select `Netplay` to install.
+Due to system file modifications, this app cannot be distributed via the Pak Store
 
 ## Update
-
-1) You can update the application directly via `About` page in the application.
-2) Or, you can update via `Pak Store`.
+You can update the application directly via `About` page in the application.
 
 ## Usage
 
@@ -88,7 +83,7 @@ Refer the youtube video for the actual in-game steps to host/join a game. This P
 - Place your GBA ROM in the `Game Boy Advance (GBA)` folder
 - **Pokémon Game specifics (FireRed/GreenLeaf/Emerald):**
   - **GBA Wireless Adapter mode:** Access to Union Room and Wireless Club Direct Corner
-  - **Link Cable - Pokemon Gen3 mode:** Access to Cable Club only (more stable, fewer crashes)
+  - **Link Cable - Pokemon Gen3 mode:** Access to Cable Club only.
   - The host will have the option to choose mode before start. If client doesnt use the same mode as host, game will be automatically restarted for client to apply the correct mode.
 <img width="50%" alt="Pokemon - FireRed 2026-01-23-03-40-44" src="https://github.com/user-attachments/assets/01ce725a-b20b-4e6e-8914-9dc68e36fb37" />
 
