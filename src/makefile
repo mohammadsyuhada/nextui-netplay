@@ -61,7 +61,13 @@ MY_LDFLAGS += -L$(PLATFORM_PATH)/libmsettings
 MY_LDFLAGS += -L$(MINARCH_PATH)/build/$(PLATFORM)
 MY_LDFLAGS += $(shell pkg-config --libs sdl2 glesv2 2>/dev/null || echo "-lSDL2 -lGLESv2")
 MY_LDFLAGS += -lSDL2_image -lSDL2_ttf
-MY_LDFLAGS += -lmsettings -lsamplerate -lzip -lm -ldl -lpthread
+MY_LDFLAGS += -lmsettings -lsamplerate -lzip -lm -lpthread -ldl -lz
+MY_LDFLAGS += -lasound
+
+# Platform-specific dependencies
+ifeq ($(PLATFORM), tg5050)
+MY_LDFLAGS += -ltinyalsa
+endif
 
 # Output binary (platform-specific)
 PRODUCT = ../bin/$(PLATFORM)/$(TARGET).elf

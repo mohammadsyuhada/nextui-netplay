@@ -36,14 +36,20 @@ static long find_version_string_offset(FILE* f) {
     size_t bytes_read;
 
     while ((bytes_read = fread(buf, 1, sizeof(buf), f)) > 0) {
-        for (size_t i = 0; i <= bytes_read - VERSION_MARKER_LEN; i++) {
-            if (memcmp(buf + i, VERSION_MARKER, VERSION_MARKER_LEN) == 0) {
-                return file_offset + i;
+        // Ensure we have enough bytes to search
+        if (bytes_read >= VERSION_MARKER_LEN) {
+            for (size_t i = 0; i <= bytes_read - VERSION_MARKER_LEN; i++) {
+                if (memcmp(buf + i, VERSION_MARKER, VERSION_MARKER_LEN) == 0) {
+                    return file_offset + i;
+                }
             }
+            // Handle marker spanning buffer boundary
+            file_offset += bytes_read - VERSION_MARKER_LEN + 1;
+            fseek(f, file_offset, SEEK_SET);
+        } else {
+            // Not enough bytes left, we're done
+            break;
         }
-        // Handle marker spanning buffer boundary
-        file_offset += bytes_read - VERSION_MARKER_LEN + 1;
-        fseek(f, file_offset, SEEK_SET);
     }
 
     return -1;  // Not found

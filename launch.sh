@@ -9,4 +9,4 @@ export LD_LIBRARY_PATH="$DIR:$DIR/bin:$DIR/bin/$PLATFORM:$LD_LIBRARY_PATH"
 export HOME="/mnt/SDCARD/.userdata/$PLATFORM"
 
 # Run the platform-specific binary
-"$DIR/bin/$PLATFORM/netplay.elf" &> "$LOGS_PATH/log.txt"
+"$DIR/bin/$PLATFORM/netplay.elf" &> "$LOGS_PATH/netplay.txt"
