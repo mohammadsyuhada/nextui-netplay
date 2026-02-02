@@ -355,8 +355,8 @@ int WIFI_direct_connect(const char* ssid, const char* pass)
         elapsed += WIFI_CONNECT_CHECK_INTERVAL_MS;
 
         if (WIFI_direct_isConnected()) {
-            // Request DHCP with retries (-t 5 = 5 retries instead of -n = no retry)
-            system("udhcpc -i wlan0 -q -t 5 >/dev/null 2>&1 &");
+            // Request DHCP with persistent background renewal (-b instead of -q)
+            system("killall udhcpc 2>/dev/null; udhcpc -i wlan0 -b -t 5 >/dev/null 2>&1 &");
 
             // Poll for valid IP instead of fixed delay (up to 10 seconds)
             char ip[16] = {0};
@@ -546,6 +546,8 @@ bool WIFI_direct_restorePreviousConnection(void) {
                             char current_ssid[128];
                             if (wifi_getCurrentSSID(current_ssid, sizeof(current_ssid)) == 0) {
                                 if (strcmp(current_ssid, hotspot_previous_ssid) == 0) {
+                                    // Request DHCP to get IP address
+                                    system("killall udhcpc 2>/dev/null; udhcpc -i wlan0 -b -t 5 >/dev/null 2>&1 &");
                                     hotspot_previous_ssid[0] = '\0';
                                     return true;
                                 }
@@ -567,6 +569,8 @@ bool WIFI_direct_restorePreviousConnection(void) {
     for (int i = 0; i < 20; i++) {
         wifi_sleep_ms(500);
         if (WIFI_direct_isConnected()) {
+            // Request DHCP to get IP address
+            system("killall udhcpc 2>/dev/null; udhcpc -i wlan0 -b -t 5 >/dev/null 2>&1 &");
             hotspot_previous_ssid[0] = '\0';
             return true;
         }

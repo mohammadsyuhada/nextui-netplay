@@ -21,8 +21,36 @@ static const char* get_basename(const char* path) {
     return slash ? slash + 1 : path;
 }
 
-// Compare two files byte-by-byte
-// Returns: 0 if identical, 1 if different, -1 on error
+// Version string marker to detect and skip during comparison
+#define VERSION_MARKER "NextUI ("
+#define VERSION_MARKER_LEN 8
+#define VERSION_SKIP_LEN 32  // Skip enough bytes to cover "NextUI (YYYY.MM.DD XXXXXXX)"
+
+// Find the offset of version string in a file
+// Returns offset if found, -1 if not found
+static long find_version_string_offset(FILE* f) {
+    fseek(f, 0, SEEK_SET);
+
+    char buf[4096];
+    long file_offset = 0;
+    size_t bytes_read;
+
+    while ((bytes_read = fread(buf, 1, sizeof(buf), f)) > 0) {
+        for (size_t i = 0; i <= bytes_read - VERSION_MARKER_LEN; i++) {
+            if (memcmp(buf + i, VERSION_MARKER, VERSION_MARKER_LEN) == 0) {
+                return file_offset + i;
+            }
+        }
+        // Handle marker spanning buffer boundary
+        file_offset += bytes_read - VERSION_MARKER_LEN + 1;
+        fseek(f, file_offset, SEEK_SET);
+    }
+
+    return -1;  // Not found
+}
+
+// Compare two files byte-by-byte, skipping embedded version strings
+// Returns: 0 if identical (ignoring version), 1 if different, -1 on error
 static int compare_files(const char* file1, const char* file2) {
     FILE* f1 = fopen(file1, "rb");
     FILE* f2 = fopen(file2, "rb");
@@ -45,13 +73,28 @@ static int compare_files(const char* file1, const char* file2) {
         return 1;  // Different sizes
     }
 
-    // Compare contents
+    // Find version string offsets in both files
+    long ver_offset1 = find_version_string_offset(f1);
+    long ver_offset2 = find_version_string_offset(f2);
+
+    // If version strings are at different offsets, files have structural differences
+    if (ver_offset1 != ver_offset2) {
+        // Unless neither has a version string, then compare normally
+        if (ver_offset1 != -1 || ver_offset2 != -1) {
+            fclose(f1);
+            fclose(f2);
+            return 1;
+        }
+    }
+
+    // Compare contents, skipping version string area
     fseek(f1, 0, SEEK_SET);
     fseek(f2, 0, SEEK_SET);
 
     char buf1[4096];
     char buf2[4096];
     size_t bytes_read;
+    long current_offset = 0;
 
     while ((bytes_read = fread(buf1, 1, sizeof(buf1), f1)) > 0) {
         if (fread(buf2, 1, bytes_read, f2) != bytes_read) {
@@ -59,16 +102,46 @@ static int compare_files(const char* file1, const char* file2) {
             fclose(f2);
             return 1;
         }
+
+        // If version string is in this chunk, mask it out before comparison
+        if (ver_offset1 >= 0) {
+            long chunk_end = current_offset + bytes_read;
+            if (ver_offset1 >= current_offset && ver_offset1 < chunk_end) {
+                // Version string starts in this chunk
+                long mask_start = ver_offset1 - current_offset;
+                long mask_end = mask_start + VERSION_SKIP_LEN;
+                if (mask_end > (long)bytes_read) mask_end = bytes_read;
+
+                // Zero out the version string area in both buffers
+                for (long i = mask_start; i < mask_end; i++) {
+                    buf1[i] = 0;
+                    buf2[i] = 0;
+                }
+            }
+            // Handle case where version string spans from previous chunk
+            else if (ver_offset1 < current_offset && ver_offset1 + VERSION_SKIP_LEN > current_offset) {
+                long mask_end = ver_offset1 + VERSION_SKIP_LEN - current_offset;
+                if (mask_end > (long)bytes_read) mask_end = bytes_read;
+
+                for (long i = 0; i < mask_end; i++) {
+                    buf1[i] = 0;
+                    buf2[i] = 0;
+                }
+            }
+        }
+
         if (memcmp(buf1, buf2, bytes_read) != 0) {
             fclose(f1);
             fclose(f2);
             return 1;  // Different content
         }
+
+        current_offset += bytes_read;
     }
 
     fclose(f1);
     fclose(f2);
-    return 0;  // Identical
+    return 0;  // Identical (ignoring version string)
 }
 
 void FileOps_init(const char* path, const char* plat) {
