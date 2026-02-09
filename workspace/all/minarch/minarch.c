@@ -4258,6 +4258,11 @@ static void input_poll_callback(void) {
 		int btn = 1 << mapping->local;
 		if (btn==BTN_NONE) continue; // not bound
 		if (!mapping->mod || PAD_isPressed(BTN_MENU)) {
+			// Skip FF/rewind for multiplayer
+			if (i==SHORTCUT_TOGGLE_FF || i==SHORTCUT_HOLD_FF ||
+			    i==SHORTCUT_HOLD_REWIND || i==SHORTCUT_TOGGLE_REWIND) {
+				if (Multiplayer_isActive()) continue;
+			}
 			if (i==SHORTCUT_TOGGLE_FF) {
 				if (PAD_justPressed(btn)) {
 					toggled_ff_on = setFastForward(!fast_forward);
@@ -8488,7 +8493,7 @@ int main(int argc , char* argv[]) {
 		GBALink_update();
 		GBALink_pollAndDeliverPackets();
 
-		if (Netplay_isActive()) {
+		if (Multiplayer_isActive()) {
 			core.run();
 		} else {
 			Rewind_run_frame();
@@ -8518,6 +8523,16 @@ int main(int argc , char* argv[]) {
 			PWR_updateFrequency(PWR_UPDATE_FREQ_INGAME,0);
 			has_pending_opt_change = config.core.changed;
 			chooseSyncRef();
+
+			// Clear FF/rewind state if multiplayer is now active
+			if (Multiplayer_isActive()) {
+				fast_forward = setFastForward(0);
+				ff_toggled = 0;
+				ff_hold_active = 0;
+				rewind_toggle = 0;
+				rewind_pressed = 0;
+				rewinding = 0;
+			}
 		}
 
 		if (resetAudio) {
