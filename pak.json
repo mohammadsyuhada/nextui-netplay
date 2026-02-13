@@ -1,12 +1,13 @@
 {
   "name": "Netplay",
-  "version": "v1.3.1",
+  "version": "v1.3.2",
   "type": "TOOL",
   "description": "Enable/disable netplay for multiplayer gaming over WiFi.",
   "author": "mohammadsyuhada",
   "repo_url": "https://github.com/mohammadsyuhada/nextui-netplay",
   "release_filename": "Netplay.pak.zip",
   "changelog": {
+    "v1.3.2": "Add NextUI v6.9.0 support",
     "v1.3.1": "Add NextUI v6.8.0 support",
     "v1.3.0": "Add NextUI v6.7.7 support"
   },
