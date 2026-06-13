@@ -30,8 +30,8 @@ True multiplayer for GameBoy Advance/Game Boy Color/Game Boy. Each player has th
 
 | | |
 |---|---|
-| **NextUI Version** | v6.7.3 ([Release](https://github.com/LoveRetro/NextUI/releases/tag/v6.7.3)) |
-| **Tested Devices** | TrimUI Brick, TrimUI Brick Hammer |
+| **NextUI Version** | v6.11.2 ([Release](https://github.com/LoveRetro/NextUI/releases/tag/v6.11.2)) |
+| **Tested Devices** | TrimUI Brick, TrimUI Brick Hammer, TrimUI Smart Pro, TrimUI Smart Pro S |
 
 ## Supported Platforms
 
