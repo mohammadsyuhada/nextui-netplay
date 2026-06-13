@@ -11,11 +11,16 @@
 #include <stddef.h>
 
 // Menu callback result codes
+// Guarded so it can coexist with the identical enum in ma_frontend_opts.h
+// (minarch.c and ma_menu.c pull in both headers).
+#ifndef MENU_CALLBACK_CODES_DEFINED
+#define MENU_CALLBACK_CODES_DEFINED
 enum {
     MENU_CALLBACK_NOP = 0,
     MENU_CALLBACK_EXIT = 1,
     MENU_CALLBACK_NEXT_ITEM = 2,
 };
+#endif
 
 // Screen/display accessors
 SDL_Surface* minarch_getScreen(void);

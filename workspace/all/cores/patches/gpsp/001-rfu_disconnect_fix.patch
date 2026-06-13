@@ -1,8 +1,8 @@
-diff --git forkSrcPrefix/libretro/libretro.c forkDstPrefix/libretro/libretro.c
-index 8069103..a288e2c 100644
---- forkSrcPrefix/libretro/libretro.c
-+++ forkDstPrefix/libretro/libretro.c
-@@ -490,7 +490,13 @@ static bool netpacket_connected(uint16_t client_id) {
+diff --git a/libretro/libretro.c b/libretro/libretro.c
+index 5f02c09..80969b3 100644
+--- a/libretro/libretro.c
++++ b/libretro/libretro.c
+@@ -512,7 +512,13 @@ static bool netpacket_connected(uint16_t client_id) {
    return true;
  }
  
@@ -16,10 +16,10 @@ index 8069103..a288e2c 100644
    netplay_num_clients--;
  }
  
-diff --git forkSrcPrefix/rfu.c forkDstPrefix/rfu.c
-index 31a515c..33fbc57 100644
---- forkSrcPrefix/rfu.c
-+++ forkDstPrefix/rfu.c
+diff --git a/rfu.c b/rfu.c
+index d5add44..2b7a8c0 100644
+--- a/rfu.c
++++ b/rfu.c
 @@ -119,6 +119,9 @@ static u32 rfu_prev_data;
  static u32 rfu_comstate, rfu_cnt, rfu_state;
  static u32 rfu_buf[255];
@@ -30,15 +30,17 @@ index 31a515c..33fbc57 100644
  static u32 rfu_timeout_cycles, rfu_resp_timeout;
  static u8 rfu_timeout, rfu_rtx_max;
  
-@@ -242,11 +245,32 @@ void rfu_reset() {
+@@ -242,6 +245,9 @@ void rfu_reset() {
    // Clear all the received broadcasts.
    memset(&rfu_peer_bcst, 0, sizeof(rfu_peer_bcst));
  
 +  // Clear any pending disconnect from previous session
 +  rfu_disconnect_pending = false;
 +
-   // Re-seed random gen.
-   rand_seed(time(NULL));
+   // Re-seed random gen.  cpu_ticks is determined by the GBA program and
+   // is therefore replay-reproducible; time(NULL) is not, and would break
+   // record/replay or netplay rollback if used here.  The seed only needs
+@@ -250,6 +256,24 @@ void rfu_reset() {
    rand_seed(cpu_ticks);
  }
  
@@ -62,8 +64,8 @@ index 31a515c..33fbc57 100644
 +
  static u16 new_devid() {
    while (1) {
-     u16 n = rand_gen() ^ time(NULL);
-@@ -593,9 +617,17 @@ u32 rfu_transfer(u32 sent_value) {
+     /* Mix in cpu_ticks (deterministic) rather than time(NULL) so the
+@@ -598,9 +622,17 @@ u32 rfu_transfer(u32 sent_value) {
    case RFU_COMSTATE_WAITCMD:
      // Wait for a new command, verify its header.
      if ((sent_value >> 16) == 0x9966) {
@@ -84,11 +86,11 @@ index 31a515c..33fbc57 100644
        if (!rfu_plen) {
          // Returns error code or response length
          s32 ret = rfu_process_command();
-diff --git forkSrcPrefix/serial.h forkDstPrefix/serial.h
-index d006423..a346f07 100644
---- forkSrcPrefix/serial.h
-+++ forkDstPrefix/serial.h
-@@ -39,6 +39,7 @@ bool update_serial(unsigned cycles);
+diff --git a/serial.h b/serial.h
+index 9f8c3d0..ce471b9 100644
+--- a/serial.h
++++ b/serial.h
+@@ -43,6 +43,7 @@ void serial_set_irq_cycles(u32 v);
  void rfu_reset(void);
  bool rfu_update(unsigned cycles);
  u32 rfu_transfer(u32 value);

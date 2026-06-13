@@ -99,13 +99,15 @@ void GBLink_setCoreOptionsForClient(const char* ip);
 // Sets gambatte_gb_link_mode to "Not Connected"
 void GBLink_setCoreOptionsDisconnect(void);
 
-// Called by minarch when gambatte logs connection status
-// This allows us to track connection state without modifying the core
+// Updates connection state. Called internally by the poll below; exposed so the
+// state machine can be driven from one place.
 void GBLink_notifyConnectionFromCore(bool connected);
 
-// Process core log message to detect connection state changes
-// Called by minarch's log callback - returns true if message was handled
-void GBLink_processLogMessage(const char* message);
+// Observe gambatte's link socket (via the kernel socket table) and update the
+// connection state. Throttled, so it is safe to call every frame and from the
+// menu/wait loops. Called lazily from GBLink_getState()/GBLink_isConnected() and
+// once per frame from minarch's main loop for in-game disconnect detection.
+void GBLink_pollConnectionState(void);
 
 // Minarch accessor and utility functions
 #include "minarch.h"

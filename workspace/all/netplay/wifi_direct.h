@@ -64,6 +64,11 @@ void WIFI_direct_disconnect(void);
 // Forget (remove) a saved network by SSID
 void WIFI_direct_forget(const char* ssid);
 
+// Forget ALL saved netplay hotspot networks (current + legacy prefixes) and
+// re-enable other saved networks. Purges stale entries left by aborted sessions.
+// Returns the number of networks removed.
+int WIFI_direct_forgetAllHotspots(void);
+
 // Scan for hotspots matching a prefix
 // Returns number of hotspots found
 // ssids_out should be an array of char[WIFI_DIRECT_SSID_MAX]
@@ -81,7 +86,7 @@ void WIFI_direct_saveCurrentConnection(void);
 bool WIFI_direct_restorePreviousConnection(void);
 
 //////////////////////////////////
-// Hotspot Functions (wlan1 AP Mode)
+// Hotspot Functions (wlan0 AP Mode)
 //////////////////////////////////
 
 // Start a WiFi hotspot with given SSID and password

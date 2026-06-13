@@ -685,10 +685,10 @@ static void* hotspot_stop_thread(void* arg) {
         WIFI_direct_stopHotspot();
     }
 
-    // Forget hotspot SSID to prevent auto-reconnection (for client case)
-    if (args->hotspot_ssid[0]) {
-        WIFI_direct_forget(args->hotspot_ssid);
-    }
+    // Forget every saved hotspot network (this session's plus any left behind by
+    // earlier sessions that didn't tear down cleanly), and re-enable other networks
+    // so wpa_supplicant.conf doesn't accumulate stale NextUI-* entries over time.
+    WIFI_direct_forgetAllHotspots();
 
     // Restore previous WiFi connection
     WIFI_direct_restorePreviousConnection();
@@ -853,108 +853,6 @@ int Menu_selectConnectionMode(const char* title) {
                 text = TTF_RenderUTF8_Blended(font.large, modes[j], text_color);
                 text_w = text->w;
                 SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, list_start_y + j * SCALE1(PILL_SIZE) + SCALE1(4)});
-                SDL_FreeSurface(text);
-            }
-
-            GFX_blitButtonGroup((char*[]){ "B","BACK", "A","SELECT", NULL }, 1, screen, 1);
-            GFX_flip(screen);
-            dirty = 0;
-        }
-
-        minarch_hdmimon();
-    }
-}
-
-// Select GBA adapter for Pokemon games (they support two different multiplayer modes)
-// Returns: 0 = Gen3 Link Cable (mul_poke), 1 = GBA Wireless Adapter (rfu), -1 = cancelled
-static int Menu_selectPokemonAdapter(void) {
-    int selected = 0;
-    int dirty = 1;
-
-    // Check current setting to pre-select
-    const char* current = minarch_getCoreOptionValue("gpsp_serial");
-    if (current && strcmp(current, "rfu") == 0) {
-        selected = 1;  // Pre-select GBA Wireless Adapter if already set
-    }
-
-    const char* adapters[] = { "Pokemon Gen3 Link Cable", "GBA Wireless Adapter" };
-    const char* hints[] = { "For Access To Cable Club", "For Access To Union Room" };
-    int adapter_count = 2;
-
-    while (1) {
-        GFX_startFrame();
-        PAD_poll();
-
-        if (PAD_justPressed(BTN_B)) {
-            return -1;  // Cancelled
-        }
-
-        if (PAD_justRepeated(BTN_UP)) {
-            selected--;
-            if (selected < 0) selected = adapter_count - 1;
-            dirty = 1;
-        }
-        else if (PAD_justRepeated(BTN_DOWN)) {
-            selected++;
-            if (selected >= adapter_count) selected = 0;
-            dirty = 1;
-        }
-        else if (PAD_justPressed(BTN_A)) {
-            return selected;
-        }
-
-        PWR_update(&dirty, NULL, minarch_beforeSleep, minarch_afterSleep);
-
-        if (dirty) {
-            GFX_clear(screen);
-            GFX_drawOnLayer(menu.bitmap, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, 0.15f, 1, 0);
-
-            SDL_Surface* text;
-            int text_w;
-            int center_x = screen->w / 2;
-
-            // Title
-            int title_y = SCALE1(40);
-            text = TTF_RenderUTF8_Blended(font.large, "Select Adapter", COLOR_WHITE);
-            text_w = text->w;
-            SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, title_y});
-            SDL_FreeSurface(text);
-
-            // Instruction
-            int instruction_y = title_y + SCALE1(30);
-            text = TTF_RenderUTF8_Blended(font.medium, "Choose connectivity mode:", COLOR_GRAY);
-            text_w = text->w;
-            SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, instruction_y});
-            SDL_FreeSurface(text);
-
-            // Adapter list with pills
-            int item_height = SCALE1(PILL_SIZE + 24);  // Space for pill + hint
-            int list_start_y = instruction_y + SCALE1(28);
-            for (int j = 0; j < adapter_count; j++) {
-                SDL_Color text_color = COLOR_WHITE;
-                if (j == selected) {
-                    text_color = uintToColour(THEME_COLOR5_255);
-                    int ow;
-                    TTF_SizeUTF8(font.large, adapters[j], &ow, NULL);
-                    ow += SCALE1(BUTTON_PADDING * 2);
-                    GFX_blitPillDark(ASSET_WHITE_PILL, screen, &(SDL_Rect){
-                        center_x - ow/2,
-                        list_start_y + j * item_height,
-                        ow,
-                        SCALE1(PILL_SIZE)
-                    });
-                }
-
-                // Adapter name
-                text = TTF_RenderUTF8_Blended(font.large, adapters[j], text_color);
-                text_w = text->w;
-                SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, list_start_y + j * item_height + SCALE1(4)});
-                SDL_FreeSurface(text);
-
-                // Hint below pill (fixed gray color for readability)
-                text = TTF_RenderUTF8_Blended(font.tiny, hints[j], COLOR_GRAY);
-                text_w = text->w;
-                SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){center_x - text_w/2, list_start_y + j * item_height + SCALE1(PILL_SIZE + 2)});
                 SDL_FreeSurface(text);
             }
 
@@ -1596,34 +1494,25 @@ static const char* getGBALinkModeName(const char* mode) {
 
 // Auto-configure gpSP serial mode for GBA multiplayer
 // Ensures a working mode is set since "auto" and "disable" don't support multiplayer
-static void autoConfigureLinkCableForGBA(void) {
+// Force gpSP's GBA link/serial mode to "auto" so the core auto-detects the correct
+// adapter from the ROM (game code at 0xAC -> gba_over.h: RFU / Pokemon cable / Adv Wars).
+// Returns true if it had to change the option and trigger a game reload; the caller must
+// then bail with MENU_CALLBACK_EXIT, since gpSP only re-reads the serial mode on game load.
+static bool forceGBALinkAutoNeedsReload(void) {
     // Only for GBA core (gpSP)
-    if (!exactMatch((char*)minarch_getCoreTag(), "GBA")) return;
+    if (!exactMatch((char*)minarch_getCoreTag(), "GBA")) return false;
 
-    // Check if we need to configure (disable or auto don't work for multiplayer)
     const char* current = minarch_getCoreOptionValue("gpsp_serial");
-    bool needs_config = !current ||
-                        strcmp(current, "disable") == 0 ||
-                        strcmp(current, "auto") == 0;
-    if (!needs_config) return;
-
-    // Detect game and set appropriate mode
-    const char* game_name = minarch_getGameName();
-
-    // Known games with specific multiplayer modes
-    // Check "Advance Wars 2" before "Advance Wars" (more specific first)
-    if (containsString((char*)game_name, "Pokemon")) {
-        minarch_setCoreOptionValue("gpsp_serial", "mul_poke");
-    } else if (containsString((char*)game_name, "Advance Wars 2")) {
-        minarch_setCoreOptionValue("gpsp_serial", "mul_aw2");
-    } else if (containsString((char*)game_name, "Advance Wars")) {
-        minarch_setCoreOptionValue("gpsp_serial", "mul_aw1");
-    } else {
-        // Unknown games (including ROM hacks): default to GBA Wireless Adapter (RFU)
-        minarch_setCoreOptionValue("gpsp_serial", "rfu");
+    if (current && strcmp(current, "auto") == 0) {
+        // Already auto-detecting (resolved at the last game load) - nothing to do.
+        return false;
     }
 
-    minarch_forceCoreOptionUpdate();
+    minarch_setCoreOptionValue("gpsp_serial", "auto");
+    minarch_saveConfig();
+    minarch_reloadGame();        // deferred; re-runs load_gamepak -> auto-detect
+    gbalink_force_resume = 1;    // close menus and resume into the reloaded game
+    return true;
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -1654,49 +1543,9 @@ int hostGame_common(LinkType type, void* list, int i) {
         return MENU_CALLBACK_NOP;
     }
 
-    // Configure link cable mode for GBA games
+    // Auto-configure link cable mode for GBA games (gpSP auto-detects via gba_over.h)
     if (type == LINK_TYPE_GBALINK) {
-        const char* game_name_check = minarch_getGameName();
-
-        // Only FireRed, LeafGreen, Emerald have Union Room - let host choose adapter
-        int isPokemon = containsString((char*)game_name_check, "Pokemon");
-        int isFireRed = containsString((char*)game_name_check, "FireRed") ||
-                    containsString((char*)game_name_check, "Fire Red");
-        int isLeafGreen = containsString((char*)game_name_check, "LeafGreen") ||
-                      containsString((char*)game_name_check, "Leaf Green");
-        int isEmerald = containsString((char*)game_name_check, "Emerald");
-        bool hasUnionRoom = isPokemon && (isFireRed || isLeafGreen || isEmerald);
-
-        if (hasUnionRoom) {
-            int adapter = Menu_selectPokemonAdapter();
-            if (adapter < 0) {
-                return MENU_CALLBACK_NOP;  // Cancelled
-            }
-
-            // Check if selected adapter differs from current
-            const char* new_mode = (adapter == 0) ? "mul_poke" : "rfu";
-            const char* current_mode = minarch_getCoreOptionValue("gpsp_serial");
-
-            // If mode changed, need to restart for gpSP to pick up new setting
-            if (!current_mode || strcmp(current_mode, new_mode) != 0) {
-                const char* new_mode_name = (adapter == 0) ? "Pokemon Gen3 Link Cable" : "GBA Wireless Adapter";
-
-                if (showLinkModeRestartDialog(new_mode_name, true)) {
-                    // Apply setting, save, reload
-                    minarch_setCoreOptionValue("gpsp_serial", new_mode);
-                    minarch_saveConfig();
-                    minarch_reloadGame();  // Deferred to avoid segfault
-                    // Set force_resume to close all menus
-                    gbalink_force_resume = 1;
-                    return MENU_CALLBACK_EXIT;
-                } else {
-                    return MENU_CALLBACK_NOP;  // Cancelled
-                }
-            }
-        } else {
-            // For other games (including other Pokemon games), auto-configure
-            autoConfigureLinkCableForGBA();
-        }
+        if (forceGBALinkAutoNeedsReload()) return MENU_CALLBACK_EXIT;
     }
 
     // Show mode selection using shared pill-style UI
@@ -1750,6 +1599,11 @@ int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
 
     const char* pass = WIFI_direct_getHotspotPassword();
 
+    // Purge stale hotspot networks while wpa_supplicant is still up (startHotspot
+    // kills it to hand wlan0 to hostapd). Clears entries this device accumulated
+    // from past client joins.
+    WIFI_direct_forgetAllHotspots();
+
     if (WIFI_direct_startHotspot(ssid, pass) != 0) {
         minarch_menuMessage("Failed to start hotspot.\nCheck device capabilities.", (char*[]){ "A","OKAY", NULL });
         return MENU_CALLBACK_NOP;
@@ -1797,9 +1651,8 @@ int hostGameHotspot_common(LinkType type, const char* game_name, uint32_t crc) {
             break;
         }
 
-        // For GBLink: run a few core frames to let gambatte process TCP connections
-        // This triggers core_log_callback which updates GBLink connection state
-        // Running multiple frames improves detection speed
+        // For GBLink: run a few core frames so gambatte can accept/process the
+        // TCP connection; GBLink_isConnected() then polls the kernel socket table.
         if (type == LINK_TYPE_GBLINK) {
             for (int i = 0; i < 5; i++) {
                 minarch_forceCoreOptionUpdate();
@@ -1980,9 +1833,8 @@ int hostGameWiFi_common(LinkType type, const char* game_name, uint32_t crc) {
             break;
         }
 
-        // For GBLink: run a few core frames to let gambatte process TCP connections
-        // This triggers core_log_callback which updates GBLink connection state
-        // Running multiple frames improves detection speed
+        // For GBLink: run a few core frames so gambatte can accept/process the
+        // TCP connection; GBLink_isConnected() then polls the kernel socket table.
         if (type == LINK_TYPE_GBLINK) {
             for (int i = 0; i < 5; i++) {
                 minarch_forceCoreOptionUpdate();
@@ -2331,6 +2183,11 @@ int joinGame_Hotspot_common(LinkType type) {
 
     *connected_to_hotspot_flag = 0;
 
+    // Purge stale hotspot networks left by previous sessions before joining a new
+    // one. Done up front (not only on teardown) so a backlog from aborted joins
+    // can't grow unbounded or let wpa_supplicant prefer an old saved hotspot.
+    WIFI_direct_forgetAllHotspots();
+
     // Show scanning message
     char scan_msg[64];
     snprintf(scan_msg, sizeof(scan_msg), "Scanning for %s hosts...", display_name);
@@ -2652,9 +2509,9 @@ int joinGame_common(LinkType type, void* list, int i) {
         return MENU_CALLBACK_NOP;
     }
 
-    // Auto-configure link cable mode for GBA games
+    // Auto-configure link cable mode for GBA games (gpSP auto-detects via gba_over.h)
     if (type == LINK_TYPE_GBALINK) {
-        autoConfigureLinkCableForGBA();
+        if (forceGBALinkAutoNeedsReload()) return MENU_CALLBACK_EXIT;
     }
 
     int selected = Menu_selectConnectionMode("Join Game");
@@ -2720,6 +2577,15 @@ int disconnect_common(LinkType type, void* list, int i) {
     if (needs_hotspot_cleanup) {
         stopHotspotAndRestoreWiFiAsync(was_host);
     }
+#ifdef HAS_WIFIMG
+    else {
+        // WiFi-mode session (no hotspot to tear down): a WIFI_direct_connect that
+        // switched networks may have left other saved networks disabled via
+        // select_network. Re-enable them now so they're usable again immediately
+        // instead of only after the next reboot/WiFi toggle.
+        WIFI_enableAll();
+    }
+#endif
 
     showTimedConfirmation("Disconnected", 1500);
     return MENU_CALLBACK_NOP;
@@ -2893,31 +2759,8 @@ int OptionGBLink_status(void* list, int i) {
 }
 
 const char* getNetplayMenuHint(void) {
-    // Only show hints for GBA (GBA Link via gpsp core)
-    if (!exactMatch((char*)minarch_getCoreTag(), "GBA")) {
-        return NULL;
-    }
-
-    // Check if this is a Pokemon game with Union Room (FireRed, LeafGreen, Emerald)
-    // containsString is case-insensitive, so we only need space variations
-    const char* game_name = minarch_getGameName();
-    int isPokemon = containsString((char*)game_name, "Pokemon");
-    int isFireRed = containsString((char*)game_name, "FireRed") ||
-                    containsString((char*)game_name, "Fire Red");
-    int isLeafGreen = containsString((char*)game_name, "LeafGreen") ||
-                      containsString((char*)game_name, "Leaf Green");
-    int isEmerald = containsString((char*)game_name, "Emerald");
-    int hasUnionRoom = isPokemon && (isFireRed || isLeafGreen || isEmerald);
-
-    // Check current link cable setting
-    const char* link_mode = minarch_getCoreOptionValue("gpsp_serial");
-    int isPokemonGen3Mode = link_mode && strcmp(link_mode, "mul_poke") == 0;
-
-    // Show Union Room hint only if game supports it AND currently set to Pokemon Gen3
-    if (hasUnionRoom && isPokemonGen3Mode) {
-        return "For Union Room: set Link Cable to 'GBA Wireless Adapter'\n(Save Changes and restart to apply).";
-    }
-
+    // GBA link adapter mode is now auto-detected by gpSP (gpsp_serial="auto"),
+    // so there is no manual setting to hint about.
     return NULL;
 }
 

@@ -521,6 +521,7 @@ GBLinkMode GBLink_getMode(void) { return gl.mode; }
 
 GBLinkState GBLink_getState(void) {
     if (!gl.initialized) return GBLINK_STATE_IDLE;
+    GBLink_pollConnectionState(); // refresh from the socket table (throttled, self-locking)
     pthread_mutex_lock(&gl.mutex);
     GBLinkState state = gl.state;
     pthread_mutex_unlock(&gl.mutex);
@@ -529,6 +530,7 @@ GBLinkState GBLink_getState(void) {
 
 bool GBLink_isConnected(void) {
     if (!gl.initialized) return false;
+    GBLink_pollConnectionState(); // refresh from the socket table (throttled, self-locking)
     pthread_mutex_lock(&gl.mutex);
     bool connected = (gl.state == GBLINK_STATE_CONNECTED);
     pthread_mutex_unlock(&gl.mutex);
@@ -586,23 +588,50 @@ void GBLink_notifyConnectionFromCore(bool connected) {
 }
 
 //////////////////////////////////////////////////////////////////////////////
-// Log Message Processing
+// Connection State Polling
 //////////////////////////////////////////////////////////////////////////////
 
-void GBLink_processLogMessage(const char* message) {
-    // Only process if GBLink session is active
-    if (gl.mode == GBLINK_OFF) return;
+// gambatte owns the GB Link TCP socket (we only set its mode/port via core
+// options), so we observe the connection by inspecting the kernel socket table
+// for an ESTABLISHED connection on `port` instead of scraping core log output.
+static bool gblink_tcp_established_on_port(uint16_t port) {
+    const char* files[] = { "/proc/net/tcp", "/proc/net/tcp6" };
+    for (int f = 0; f < 2; f++) {
+        FILE* fp = fopen(files[f], "r");
+        if (!fp) continue;
+        char line[512];
+        if (fgets(line, sizeof(line), fp)) { // skip header row
+            unsigned local_port, rem_port, st;
+            while (fgets(line, sizeof(line), fp)) {
+                // Columns: sl local_addr:PORT rem_addr:PORT st ... (addr/port in hex)
+                if (sscanf(line, "%*d: %*[0-9A-Fa-f]:%x %*[0-9A-Fa-f]:%x %x",
+                           &local_port, &rem_port, &st) == 3) {
+                    // st 0x01 == TCP_ESTABLISHED. Host: local port == our port;
+                    // client: remote port == our port. LISTEN/TIME_WAIT won't match.
+                    if (st == 0x01 && (local_port == port || rem_port == port)) {
+                        fclose(fp);
+                        return true;
+                    }
+                }
+            }
+        }
+        fclose(fp);
+    }
+    return false;
+}
 
-    // Check for connection messages (case-insensitive)
-    // Gambatte logs: "GameLink network server connected to client!" or similar
-    if (strcasestr(message, "server connected") ||
-        strcasestr(message, "client connected") ||
-        (strcasestr(message, "gamelink") && strcasestr(message, "connected"))) {
-        GBLink_notifyConnectionFromCore(true);
-    }
-    // Network stopped (disconnection)
-    else if (strcasestr(message, "Stopping GameLink") ||
-             strcasestr(message, "disconnected")) {
-        GBLink_notifyConnectionFromCore(false);
-    }
+// Poll gambatte's link socket and feed the state machine. Throttled (~0.5s) so
+// it is cheap to call every frame and from the menu/wait loops. Drives the same
+// GBLink_notifyConnectionFromCore() transitions the old log scraper did.
+void GBLink_pollConnectionState(void) {
+    if (!gl.initialized || gl.mode == GBLINK_OFF) return;
+
+    static uint64_t last_us = 0;
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    uint64_t now = (uint64_t)tv.tv_sec * 1000000ULL + tv.tv_usec;
+    if (last_us && (now - last_us) < 500000ULL) return; // ~0.5s throttle
+    last_us = now;
+
+    GBLink_notifyConnectionFromCore(gblink_tcp_established_on_port(gl.port));
 }
